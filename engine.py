@@ -13,6 +13,7 @@ Commands (run by GitHub Actions, see .github/workflows):
     python engine.py sync-stripe    # daily: update plans from Stripe
     python engine.py digest         # daily: paid digests; on Mondays also free digests
     python engine.py digest --dry-run
+    python engine.py confirmations  # hourly: double opt-in emails
 
 Environment (set as GitHub Actions secrets, never in code):
     SUPABASE_URL, SUPABASE_SERVICE_KEY   production storage (omit both to use SQLite)
@@ -86,7 +87,7 @@ class SQLiteStore:
     CREATE TABLE IF NOT EXISTS notices (ocid TEXT PRIMARY KEY, title TEXT, description TEXT, buyer TEXT,
       value REAL, deadline TEXT, cpvs TEXT, regions TEXT, url TEXT, summary TEXT, seen_at TEXT);
     CREATE TABLE IF NOT EXISTS subscribers (id TEXT PRIMARY KEY, email TEXT UNIQUE, pack TEXT, regions TEXT,
-      plan TEXT DEFAULT 'free', status TEXT DEFAULT 'active', unsub_token TEXT, created_at TEXT);
+      plan TEXT DEFAULT 'free', status TEXT DEFAULT 'pending', unsub_token TEXT, created_at TEXT, confirm_sent_at TEXT);
     CREATE TABLE IF NOT EXISTS sent (subscriber_id TEXT, ocid TEXT, sent_at TEXT, PRIMARY KEY (subscriber_id, ocid));
     CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT);
     """
@@ -128,6 +129,12 @@ class SQLiteStore:
 
     def all_subscribers(self):
         return [dict(r) for r in self.con.execute("SELECT * FROM subscribers")]
+
+    def pending_unconfirmed(self):
+        return [dict(r) for r in self.con.execute("SELECT * FROM subscribers WHERE status='pending' AND confirm_sent_at IS NULL")]
+
+    def delete_stale_pending(self, before_iso):
+        self.con.execute("DELETE FROM subscribers WHERE status='pending' AND created_at < ?", (before_iso,)); self.con.commit()
 
     def update_subscriber(self, sid, fields):
         sets = ",".join(f"{k}=?" for k in fields)
@@ -192,6 +199,12 @@ class SupabaseStore:
 
     def all_subscribers(self):
         return self._req("GET", "subscribers?select=*")
+
+    def pending_unconfirmed(self):
+        return self._req("GET", "subscribers?status=eq.pending&confirm_sent_at=is.null&select=*")
+
+    def delete_stale_pending(self, before_iso):
+        self._req("DELETE", f"subscribers?status=eq.pending&created_at=lt.{urllib.parse.quote(before_iso)}")
 
     def update_subscriber(self, sid, fields):
         self._req("PATCH", f"subscribers?id=eq.{sid}", fields)
@@ -359,6 +372,34 @@ def apply_plans(s, paid: dict) -> dict:
     return report
 
 
+# ---------------------------------------------------------------- double opt-in
+
+def render_confirmation(sub: dict) -> str:
+    link = f"{SITE_URL}/confirm.html?t={sub['unsub_token']}"
+    address = html.escape(os.environ.get("POSTAL_ADDRESS", ""))
+    return f"""<div style="max-width:560px;margin:auto;padding:24px;font:15px/1.6 system-ui;color:#0e1512">
+    <h1 style="font:700 20px system-ui">Confirm your Bid Canary alerts</h1>
+    <p>Someone (hopefully you) asked for weekly public sector tender alerts for
+    {html.escape(PACKS.get(sub['pack'], {'label': sub['pack']})['label'].lower())} to be sent to this address.</p>
+    <p><a href="{link}" style="display:inline-block;background:#FFD43B;color:#0e1512;font-weight:600;padding:12px 20px;border-radius:999px;text-decoration:none">Yes, send me tenders</a></p>
+    <p style="color:#475569">If this wasn't you, ignore this email and you won't hear from us again. Unconfirmed sign-ups are deleted after 7 days.</p>
+    <p style="font-size:12px;color:#64748b">Bid Canary{(' · ' + address) if address else ''}</p></div>"""
+
+
+def send_confirmations(s, dry_run=False) -> dict:
+    """Email a confirmation link to new sign-ups; delete ones never confirmed after 7 days."""
+    cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).replace(microsecond=0).isoformat()
+    s.delete_stale_pending(cutoff)
+    sent = []
+    for sub in s.pending_unconfirmed():
+        if not dry_run:
+            send_email(sub["email"], "Confirm your Bid Canary tender alerts", render_confirmation(sub),
+                       f"{SITE_URL}/unsubscribe.html?t={sub['unsub_token']}")
+        s.update_subscriber(sub["id"], {"confirm_sent_at": now()})
+        sent.append(sub["email"])
+    return {"confirmation_emails": len(sent)}
+
+
 # ---------------------------------------------------------------- digest
 
 def money(v) -> str:
@@ -431,6 +472,8 @@ if __name__ == "__main__":
     s = store()
     if cmd == "fetch":
         n = fetch(s); build_counts(s); print(f"stored {n} releases; counts rebuilt")
+    elif cmd == "confirmations":
+        print(json.dumps(send_confirmations(s, dry_run="--dry-run" in sys.argv)))
     elif cmd == "sync-stripe":
         print(json.dumps(sync_stripe(s)))
     elif cmd == "digest":

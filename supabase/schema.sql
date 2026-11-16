@@ -11,9 +11,10 @@ create table if not exists subscribers (
   pack text not null check (pack in ('cleaning', 'security', 'grounds', 'fm')),
   regions text not null default '' check (regions ~ '^(UK[C-N](,UK[C-N])*)?$'),
   plan text not null default 'free' check (plan in ('free', 'starter', 'pro')),
-  status text not null default 'active' check (status in ('active', 'unsubscribed')),
+  status text not null default 'pending' check (status in ('pending', 'active', 'unsubscribed')),
   unsub_token uuid not null default gen_random_uuid(),
   consent_text text check (length(consent_text) <= 500),
+  confirm_sent_at timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -43,9 +44,17 @@ revoke all on subscribers from anon, authenticated;
 grant insert (email, pack, regions, consent_text) on subscribers to anon;
 drop policy if exists "public free signup" on subscribers;
 create policy "public free signup" on subscribers for insert to anon
-  with check (plan = 'free' and status = 'active');
+  with check (plan = 'free' and status = 'pending');
 
 -- Unsubscribe link: works with the secret token in the email, reveals nothing.
+create or replace function confirm_subscription(token uuid) returns boolean
+language sql security definer set search_path = public as $$
+  with u as (update subscribers set status = 'active' where unsub_token = token and status = 'pending' returning 1)
+  select exists (select 1 from u);
+$$;
+revoke all on function confirm_subscription(uuid) from public;
+grant execute on function confirm_subscription(uuid) to anon;
+
 create or replace function unsubscribe(token uuid) returns boolean
 language sql security definer set search_path = public as $$
   with u as (update subscribers set status = 'unsubscribed' where unsub_token = token returning 1)

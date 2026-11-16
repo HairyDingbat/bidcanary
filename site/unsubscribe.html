@@ -3,6 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*.supabase.co https://cloudflareinsights.com; form-action 'self'; base-uri 'self'; object-src 'none'; upgrade-insecure-requests">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<link rel="icon" href="favicon.ico" sizes="48x48">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
+<meta name="theme-color" content="#0E1512">
 <meta name="robots" content="noindex">
 <title>Unsubscribe · Bid Canary</title>
 <style>body{margin:0;font:17px/1.6 Inter,system-ui,sans-serif;background:#F6F5EF;color:#0E1512;display:grid;place-items:center;min-height:100vh;padding:24px}main{max-width:520px;background:#fff;border:1px solid #E3E1D6;border-radius:20px;padding:32px}h1{font:700 28px system-ui;margin:0 0 12px}a{color:#0F3D2E}</style>
@@ -14,21 +21,7 @@
 <p>Paid subscribers: unsubscribing stops the emails but not your payment. Cancel your plan from the link in your Stripe receipt.</p>
 <p><a href="./">Back to Bid Canary</a></p>
 </main>
-<script src="config.js"></script>
-<script>
-(function () {
-  var cfg = window.BC_CONFIG || {}, msg = document.getElementById('msg');
-  var t = new URLSearchParams(location.search).get('t');
-  if (!t || !/^[0-9a-f-]{36}$/i.test(t)) { msg.textContent = 'This link is incomplete. Reply to any digest email and we will remove you.'; return; }
-  if (!cfg.supabaseUrl) { msg.textContent = 'Preview only.'; return; }
-  fetch(cfg.supabaseUrl.replace(/\/$/, '') + '/rest/v1/rpc/unsubscribe', {
-    method: 'POST',
-    headers: Object.assign({'apikey': cfg.supabaseAnonKey, 'Content-Type': 'application/json'}, /^sb_/.test(cfg.supabaseAnonKey) ? {} : {'Authorization': 'Bearer ' + cfg.supabaseAnonKey}),
-    body: JSON.stringify({token: t})
-  }).then(function (r) { return r.json(); }).then(function (ok) {
-    msg.textContent = ok ? 'Done. You won’t get any more Bid Canary digests.' : 'We couldn’t find that subscription; it may already be cancelled.';
-  }).catch(function () { msg.textContent = 'Something went wrong. Reply to any digest email and we will remove you.'; });
-})();
-</script>
+<script src="config.js" defer></script>
+<script src="unsubscribe.js" defer></script>
 </body>
 </html>

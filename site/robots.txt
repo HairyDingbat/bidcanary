@@ -1,4 +1,5 @@
 User-agent: *
 Allow: /
 Disallow: /unsubscribe.html
+Disallow: /confirm.html
 Sitemap: https://bidcanary.co.uk/sitemap.xml

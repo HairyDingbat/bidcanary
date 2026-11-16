@@ -33,6 +33,16 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python engine.py fetch
+      - name: Send confirmation emails to new sign-ups
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+          SITE_URL: ${{ secrets.SITE_URL }}
+          POSTAL_ADDRESS: ${{ secrets.POSTAL_ADDRESS }}
+        if: env.RESEND_API_KEY != ''
+        run: python engine.py confirmations
       - name: Write public site config
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

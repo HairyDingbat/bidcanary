@@ -36,6 +36,17 @@ s.insert_subscriber({"id": "paid1", "email": "paid@example.com", "pack": "cleani
 monday = dt.date(2026, 11, 16)
 tuesday = monday + dt.timedelta(days=1)
 
+# Double opt-in: a pending sign-up gets one confirmation email and no digest until confirmed.
+s.insert_subscriber({"id": "pend1", "email": "pending@example.com", "pack": "cleaning", "regions": "UKD",
+                     "plan": "free", "status": "pending", "unsub_token": "t3", "created_at": engine.now()})
+s.insert_subscriber({"id": "old1", "email": "stale@example.com", "pack": "cleaning", "regions": "UKD",
+                     "plan": "free", "status": "pending", "unsub_token": "t4", "created_at": "2020-01-01T00:00:00+00:00"})
+c = engine.send_confirmations(s, dry_run=True)
+assert c == {"confirmation_emails": 1}, c                      # stale one deleted, fresh one emailed
+assert engine.send_confirmations(s, dry_run=True) == {"confirmation_emails": 0}  # not re-sent
+assert "stale@example.com" not in [x["email"] for x in s.all_subscribers()]
+assert "confirm.html?t=t3" in engine.render_confirmation({"pack": "cleaning", "unsub_token": "t3"})
+
 # Stripe sync upgrades a matching email; an unknown payer is flagged for follow-up.
 rep = engine.apply_plans(s, {"paid@example.com": "starter", "stranger@example.com": "starter"})
 assert rep["upgraded"] == ["paid@example.com"] and rep["paid_without_profile"] == ["stranger@example.com"], rep
@@ -48,6 +59,7 @@ assert "Synthetic test notice" in out["paid@example.com"]["html"]  # summary sho
 
 # Monday: free subscriber gets top 5 plus an upsell for the other 2, without summaries.
 out = engine.digest(s, dry_run=True, today=monday)
+assert "pending@example.com" not in out  # unconfirmed sign-ups get nothing
 f = out["free@example.com"]
 assert f["count"] == 7 and "2 more matching tenders" in f["html"] and "Synthetic test notice" not in f["html"]
 assert "unsubscribe.html?t=t1" in f["html"]

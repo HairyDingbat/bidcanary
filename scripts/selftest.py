@@ -73,9 +73,18 @@ check("public key cannot run the cleanup function", s >= 400, f"{s} {b}")
 
 s, b = call("GET", f"subscribers?email=eq.{email}&select=id,plan,status,unsub_token", SEC)
 row = b[0] if s == 200 and b else None
-check("secret key can read the signup (free, active)", bool(row) and row["plan"] == "free" and row["status"] == "active", f"{s} {b}")
+check("new signup starts unconfirmed (free, pending)", bool(row) and row["plan"] == "free" and row["status"] == "pending", f"{s} {b}")
+
+s, b = call("POST", "subscribers", PUB, {"email": "y" + email, "pack": "cleaning", "status": "active"}, {"Prefer": "return=minimal"})
+check("public key cannot skip email confirmation", s >= 400, f"{s} {b}")
 
 if row:
+    s, b = call("POST", "rpc/confirm_subscription", PUB, {"token": str(uuid.uuid4())})
+    check("a made-up confirmation token does nothing", s == 200 and b is False, f"{s} {b}")
+    s, b = call("POST", "rpc/confirm_subscription", PUB, {"token": row["unsub_token"]})
+    check("confirmation link activates the signup", s == 200 and b is True, f"{s} {b}")
+    s, b = call("POST", "rpc/confirm_subscription", PUB, {"token": row["unsub_token"]})
+    check("confirmation link can't be reused", s == 200 and b is False, f"{s} {b}")
     s, b = call("POST", "rpc/unsubscribe", PUB, {"token": row["unsub_token"]})
     check("unsubscribe link works", s == 200 and b is True, f"{s} {b}")
     s, b = call("POST", "rpc/unsubscribe", PUB, {"token": str(uuid.uuid4())})
@@ -84,7 +93,7 @@ if row:
 s, b = call("GET", "notices?select=ocid&limit=1", SEC)
 check("engine has stored tender notices", s == 200 and bool(b), f"{s} {b}")
 
-s, b = call("DELETE", f"subscribers?email=like.selftest-*", SEC)
+s, b = call("DELETE", f"subscribers?email=like.*selftest-*", SEC)
 check("test signup cleaned up", s in (200, 204), f"{s} {b}")
 
 print("ALL PASSED" if not fails else f"{fails} FAILED")

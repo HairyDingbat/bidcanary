@@ -3,6 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*.supabase.co https://cloudflareinsights.com; form-action 'self'; base-uri 'self'; object-src 'none'; upgrade-insecure-requests">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<link rel="icon" href="favicon.ico" sizes="48x48">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
+<meta name="theme-color" content="#0E1512">
 <title>Bid Canary · Public sector tenders for cleaning, security and grounds firms</title>
 <link rel="canonical" href="https://bidcanary.co.uk/">
 <meta property="og:title" content="Bid Canary · Public sector tenders for cleaning, security and grounds firms">
@@ -107,6 +114,7 @@ footer{border-top:1px solid var(--line);padding:36px 0;font-size:14px;color:var(
       <div><label for="s-pack">Your trade</label><select id="s-pack" required></select></div>
       <div><label for="s-region">Region</label><select id="s-region"></select></div>
     </div>
+    <div aria-hidden="true" style="position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden"><label for="s-website">Leave this empty</label><input id="s-website" type="text" tabindex="-1" autocomplete="off"></div>
     <div style="margin-top:12px"><label for="s-email">Work email</label><input id="s-email" type="email" autocomplete="email" placeholder="you@yourcompany.co.uk" required></div>
     <label class="check" style="color:#B9C4BE" for="s-biz"><input type="checkbox" id="s-biz" required> I'm signing up for my business, and I agree to the <a href="terms.html" style="color:var(--y)">terms</a>.</label>
     <p class="check" style="color:#B9C4BE;margin-top:6px">We'll email you the weekly digest you've asked for. Every email has a one-click unsubscribe. See our <a href="privacy.html" style="color:var(--y)">privacy notice</a>.</p>
@@ -129,66 +137,7 @@ footer{border-top:1px solid var(--line);padding:36px 0;font-size:14px;color:var(
   <div style="max-width:440px"><a href="terms.html">Terms</a> · <a href="privacy.html">Privacy</a> · <a href="cookies.html">Cookies</a> · <a href="accessibility.html">Accessibility</a><br>Contains public sector information licensed under the Open Government Licence v3.0. Not affiliated with the UK government.</div>
 </div></footer>
 
-<script src="config.js"></script>
-<script>
-(function () {
-  var cfg = window.BC_CONFIG || {};
-  if (cfg.cfAnalyticsToken) {  // cookie-free visit counts; see cookies.html
-    var a = document.createElement('script'); a.defer = true; a.src = 'https://static.cloudflareinsights.com/beacon.min.js';
-    a.setAttribute('data-cf-beacon', JSON.stringify({token: cfg.cfAnalyticsToken})); document.head.appendChild(a);
-  }
-  var PACKS = {cleaning: 'Cleaning', security: 'Security', grounds: 'Grounds maintenance', fm: 'Facilities management'};
-  var REGIONS = {UKC:'North East',UKD:'North West',UKE:'Yorkshire and the Humber',UKF:'East Midlands',UKG:'West Midlands',UKH:'East of England',UKI:'London',UKJ:'South East',UKK:'South West',UKL:'Wales',UKM:'Scotland',UKN:'Northern Ireland'};
-  function fill(sel, map, any) {
-    if (any) sel.add(new Option(any, ''));
-    Object.keys(map).forEach(function (k) { sel.add(new Option(map[k], k)); });
-  }
-  var cp = document.getElementById('c-pack'), cr = document.getElementById('c-region');
-  var sp = document.getElementById('s-pack'), sr = document.getElementById('s-region');
-  fill(cp, PACKS); fill(cr, REGIONS); fill(sp, PACKS); fill(sr, REGIONS, 'All of the UK');
-  cr.value = 'UKD';
-  var data = null, out = document.getElementById('c-out');
-  function esc(s) { return String(s || '').replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
-  function money(v) { return v == null ? 'Value not stated' : '£' + Math.round(v).toLocaleString('en-GB'); }
-  function render() {
-    if (!data) { out.innerHTML = '<p class="meta">Live counts will appear here once the service is running.</p>'; return; }
-    var r = data.packs[cp.value].regions[cr.value];
-    var h = '<div class="big">' + r.count + '</div><p style="margin:0 0 6px">open ' + esc(PACKS[cp.value].toLowerCase()) + ' tenders covering ' + esc(REGIONS[cr.value]) + ', including ones with no location stated.</p>';
-    r.examples.forEach(function (e) {
-      h += '<div class="ex"><b>' + esc(e.title) + '</b><span class="meta">' + esc(e.buyer) + ' · ' + money(e.value) + (e.deadline ? ' · Closes ' + esc(e.deadline) : '') + '</span></div>';
-    });
-    h += '<p style="margin:16px 0 0"><a class="btn btn-y" href="#signup">Get these by email, free</a></p>';
-    h += '<p class="meta">Updated ' + esc(new Date(data.updated).toLocaleString('en-GB')) + '</p>';
-    out.innerHTML = h;
-    sp.value = cp.value; sr.value = cr.value;
-  }
-  cp.addEventListener('change', render); cr.addEventListener('change', render);
-  fetch('data/counts.json', {cache: 'no-store'}).then(function (r) { return r.ok ? r.json() : null; })
-    .then(function (d) { data = d; render(); }).catch(function () { render(); });
-
-  var form = document.getElementById('signup-form'), st = document.getElementById('s-status');
-  form.addEventListener('submit', function (e) {
-    e.preventDefault();
-    var email = document.getElementById('s-email').value.trim().toLowerCase();
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { st.textContent = 'Please enter a valid email address.'; return; }
-    if (!document.getElementById('s-biz').checked) { st.textContent = 'Please confirm you\u2019re signing up for a business.'; return; }
-    if (!cfg.supabaseUrl || !cfg.supabaseAnonKey) { st.textContent = 'Preview only: sign-ups open at launch.'; return; }
-    st.textContent = 'Signing you up…';
-    fetch(cfg.supabaseUrl.replace(/\/$/, '') + '/rest/v1/subscribers', {
-      method: 'POST',
-      headers: Object.assign({'apikey': cfg.supabaseAnonKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal'}, /^sb_/.test(cfg.supabaseAnonKey) ? {} : {'Authorization': 'Bearer ' + cfg.supabaseAnonKey}),
-      body: JSON.stringify({email: email, pack: sp.value, regions: sr.value, consent_text: 'Weekly digest requested on website; confirmed business use and accepted terms; ' + new Date().toISOString()})
-    }).then(function (r) {
-      if (r.ok) {
-        st.innerHTML = 'You’re in. Your first digest arrives on Monday.' + (cfg.starterLink ? ' Want every tender daily? <a style="color:#FFD43B" href="' + esc(cfg.starterLink) + '?prefilled_email=' + encodeURIComponent(email) + '">Upgrade to Starter</a>.' : '');
-      } else if (r.status === 409) {
-        st.textContent = 'You’re already signed up with that email.';
-      } else { st.textContent = 'Something went wrong. Please try again.'; }
-    }).catch(function () { st.textContent = 'Something went wrong. Please try again.'; });
-  });
-  var sb = document.getElementById('starter-btn');
-  if (cfg.starterLink) { sb.href = cfg.starterLink; sb.textContent = 'Start Starter'; }
-})();
-</script>
+<script src="config.js" defer></script>
+<script src="app.js" defer></script>
 </body>
 </html>
