@@ -369,6 +369,7 @@ def render_digest(items: list[dict], sub: dict, extra_count: int = 0) -> str:
 
 def send_email(to: str, subject: str, html_body: str, unsub_url: str) -> None:
     body = json.dumps({"from": os.environ["FROM_EMAIL"], "to": [to], "subject": subject, "html": html_body,
+                       "reply_to": os.environ.get("REPLY_TO", "hello@bidcanary.co.uk"),
                        "headers": {"List-Unsubscribe": f"<{unsub_url}>"}}).encode()
     http_json("https://api.resend.com/emails", body,
               {"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}", "Content-Type": "application/json"})
