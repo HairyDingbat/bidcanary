@@ -59,6 +59,13 @@ check("public key can add a free signup", s in (200, 201), f"{s} {b}")
 s, b = call("POST", "subscribers", PUB, {"email": email, "pack": "cleaning", "regions": "UKD"}, {"Prefer": "return=minimal"})
 check("duplicate email is rejected with 409", s == 409, f"{s} {b}")
 
+s, b = call("POST", "subscribers", PUB, {"email": "kw-" + email, "pack": "construction", "regions": "UKD,UKE", "keywords": "roofing, solar", "consent_text": "selftest"},
+            {"Prefer": "return=minimal"})
+check("public key can add a new sector with keywords", s in (200, 201), f"{s} {b}")
+
+s, b = call("POST", "subscribers", PUB, {"email": "bad-" + email, "pack": "Not A Sector!", "consent_text": "selftest"}, {"Prefer": "return=minimal"})
+check("junk sector values are rejected", s >= 400, f"{s} {b}")
+
 s, b = call("GET", "subscribers?select=email", PUB)
 check("public key cannot read subscribers", s in (401, 403) or (s == 200 and b == []), f"{s} {b}")
 
