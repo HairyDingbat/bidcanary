@@ -42,6 +42,14 @@
   fetch('data/counts.json', {cache: 'no-store'}).then(function (r) { return r.ok ? r.json() : null; })
     .then(function (d) { data = d; render(); }).catch(function () { render(); });
 
+  // Referral code from a customer's link (?ref=abcd1234); kept for this visit only.
+  var ref = null;
+  try {
+    var r0 = new URLSearchParams(location.search).get('ref');
+    if (r0 && /^[a-f0-9]{8}$/.test(r0)) sessionStorage.setItem('bc_ref', r0);
+    ref = sessionStorage.getItem('bc_ref');
+  } catch (e) { ref = null; }
+  if (ref && !/^[a-f0-9]{8}$/.test(ref)) ref = null;
   var form = document.getElementById('signup-form'), st = document.getElementById('s-status');
   form.addEventListener('submit', function (e) {
     e.preventDefault();
@@ -56,15 +64,17 @@
     fetch(cfg.supabaseUrl.replace(/\/$/, '') + '/rest/v1/subscribers', {
       method: 'POST',
       headers: Object.assign({'apikey': cfg.supabaseAnonKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal'}, /^sb_/.test(cfg.supabaseAnonKey) ? {} : {'Authorization': 'Bearer ' + cfg.supabaseAnonKey}),
-      body: JSON.stringify(Object.assign({email: email, pack: sp.value, regions: sr.value}, kws ? {keywords: kws} : {}, {consent_text: 'Weekly digest requested on website; confirmed business use and accepted terms; ' + new Date().toISOString()}))
+      body: JSON.stringify(Object.assign({email: email, pack: sp.value, regions: sr.value}, kws ? {keywords: kws} : {}, ref ? {referred_by: ref} : {}, {consent_text: '14-day trial then weekly digest requested on website; confirmed business use and accepted terms; ' + new Date().toISOString()}))
     }).then(function (r) {
       if (r.ok) {
-        st.textContent = 'Nearly done: we’ve emailed you a link. Click it to confirm, and your first digest arrives on Monday.';
+        st.textContent = 'Nearly done: we’ve emailed you a link. Click it to confirm, and your 14-day trial starts with tomorrow morning’s digest.';
       } else if (r.status === 409) {
         st.textContent = 'You’re already signed up with that email.';
       } else { st.textContent = 'Something went wrong. Please try again.'; }
     }).catch(function () { st.textContent = 'Something went wrong. Please try again.'; });
   });
   var sb = document.getElementById('starter-btn');
-  if (cfg.starterLink) { sb.href = cfg.starterLink; sb.textContent = 'Start Starter'; }
+  if (cfg.starterLink) { sb.href = cfg.starterLink; sb.textContent = 'Pay monthly: £29.99'; }
+  var ab = document.getElementById('starter-annual-btn');
+  if (cfg.starterAnnualLink) { ab.href = cfg.starterAnnualLink; ab.hidden = false; }
 })();

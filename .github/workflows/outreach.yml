@@ -1,0 +1,71 @@
+name: Outreach - check contacts and send cold emails
+
+# Sends NOTHING until the owners set repo variables OUTREACH_ENABLED=true and
+# OUTREACH_APPROVED_VERSION to the wording version in outreach.py, and add the mailbox secrets.
+# Manual runs default to a dry run: up to 3 preview emails go to OWNER_EMAIL only.
+
+on:
+  schedule:
+    - cron: "41 8 * * 1-5"   # weekdays 08:41 UTC (08:41 UK in winter, 09:41 in summer)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview only: send up to 3 sample emails to the owners, nothing to contacts"
+        type: boolean
+        default: true
+      resume:
+        description: "Clear an automatic pause (only after fixing the cause)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: bidcanary-outreach
+  cancel-in-progress: false
+
+jobs:
+  outreach:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      COMPANIES_HOUSE_API_KEY: ${{ secrets.COMPANIES_HOUSE_API_KEY }}
+      MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
+      MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+      MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
+      POSTAL_ADDRESS: ${{ secrets.POSTAL_ADDRESS }}
+      SITE_URL: ${{ secrets.SITE_URL }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+      OUTREACH_ENABLED: ${{ vars.OUTREACH_ENABLED }}
+      OUTREACH_APPROVED_VERSION: ${{ vars.OUTREACH_APPROVED_VERSION }}
+      OUTREACH_DAILY_LIMIT: ${{ vars.OUTREACH_DAILY_LIMIT }}
+      OUTREACH_PACKS: ${{ vars.OUTREACH_PACKS }}
+      OUTREACH_MAILBOX: ${{ vars.OUTREACH_MAILBOX }}
+      OUTREACH_SENDER_NAME: ${{ vars.OUTREACH_SENDER_NAME }}
+      COMPANY_LINE: ${{ vars.COMPANY_LINE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Resume after a pause
+        if: github.event_name == 'workflow_dispatch' && inputs.resume
+        run: python outreach.py resume
+      - name: Check new contacts with Companies House
+        run: python outreach.py check
+      - name: Read replies, opt-outs and bounces
+        run: python outreach.py inbox
+      - name: Send today's emails
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            python outreach.py send --dry-run
+          else
+            python outreach.py send
+          fi
+      - name: Monthly clean-up of old contacts
+        if: github.event_name == 'schedule'
+        run: |
+          if [ "$(date -u +%d)" -le "07" ] && [ "$(date -u +%u)" = "1" ]; then python outreach.py prune; fi
+      - name: Status
+        run: python outreach.py status

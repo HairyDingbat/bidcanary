@@ -2,8 +2,10 @@
 
 Pulls new notices from the free Find a Tender OCDS API (Open Government Licence v3.0),
 matches them to subscribers, and emails digests:
+  * trial:        every new sign-up gets the daily Starter digest free for 14 days after confirming
   * free plan:    weekly email (Mondays), one showcase tender with its summary, plus a count of the rest
-  * starter/pro:  daily digest with plain-English summaries
+  * starter/pro:  daily digest with plain-English summaries (monthly or annual)
+It also collects suppliers named on contract award notices, for outreach.py (cold outreach).
 
 Storage: Supabase (Postgres over its REST API) in production, SQLite locally/tests.
 Payments: Stripe Payment Links; `sync-stripe` reads active subscriptions and sets plans.
@@ -18,7 +20,8 @@ Commands (run by GitHub Actions, see .github/workflows):
 Environment (set as GitHub Actions secrets, never in code):
     SUPABASE_URL, SUPABASE_SERVICE_KEY   production storage (omit both to use SQLite)
     RESEND_API_KEY, FROM_EMAIL           email sending
-    STRIPE_SECRET_KEY (restricted, read-only), STRIPE_PRICE_STARTER, STRIPE_PRICE_PRO
+    STRIPE_SECRET_KEY (restricted, read-only), STRIPE_PRICE_STARTER, STRIPE_PRICE_STARTER_ANNUAL, STRIPE_PRICE_PRO
+    OWNER_EMAIL                          where owner reports go (default support@bidcanary.co.uk)
     ANTHROPIC_API_KEY                    optional; rule-based summaries without it
     SITE_URL                             e.g. https://bidcanary.co.uk
     POSTAL_ADDRESS                       sender's postal address for the email footer
@@ -36,6 +39,9 @@ import urllib.parse
 import urllib.request
 
 FTS_URL = "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages"
+PRICE_MONTHLY, PRICE_ANNUAL = "£29.99", "£299"
+FOUNDING_LIMIT = 50  # first N paying customers keep today's price for as long as they stay subscribed
+OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "support@bidcanary.co.uk")
 ATTRIBUTION = ("Contains public sector information licensed under the Open Government "
                "Licence v3.0. Source: Find a Tender, Cabinet Office.")
 SITE_URL = os.environ.get("SITE_URL", "https://bidcanary.co.uk").rstrip("/")
@@ -104,7 +110,14 @@ class SQLiteStore:
     CREATE TABLE IF NOT EXISTS notices (ocid TEXT PRIMARY KEY, title TEXT, description TEXT, buyer TEXT,
       value REAL, deadline TEXT, cpvs TEXT, regions TEXT, url TEXT, summary TEXT, seen_at TEXT);
     CREATE TABLE IF NOT EXISTS subscribers (id TEXT PRIMARY KEY, email TEXT UNIQUE, pack TEXT, regions TEXT, keywords TEXT,
-      plan TEXT DEFAULT 'free', status TEXT DEFAULT 'pending', unsub_token TEXT, created_at TEXT, confirm_sent_at TEXT);
+      plan TEXT DEFAULT 'free', status TEXT DEFAULT 'pending', unsub_token TEXT, created_at TEXT, confirm_sent_at TEXT,
+      trial_ends_at TEXT, trial_end_notified_at TEXT, founding INTEGER DEFAULT 0,
+      ref_code TEXT UNIQUE DEFAULT (lower(hex(randomblob(4)))), referred_by TEXT, referral_flagged_at TEXT);
+    CREATE TABLE IF NOT EXISTS outreach_contacts (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+      company_number TEXT UNIQUE, company_name TEXT, email TEXT, contact_name TEXT, region TEXT, pack TEXT,
+      source_ocid TEXT, award_title TEXT, company_type TEXT, status TEXT DEFAULT 'new', skip_reason TEXT, subject TEXT,
+      emailed_at TEXT, followed_up_at TEXT, responded_at TEXT,
+      optout_token TEXT DEFAULT (lower(hex(randomblob(16)))), created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS sent (subscriber_id TEXT, ocid TEXT, sent_at TEXT, PRIMARY KEY (subscriber_id, ocid));
     CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT);
     """
@@ -166,6 +179,22 @@ class SQLiteStore:
 
     def mark_sent(self, sid, ocids):
         self.con.executemany("INSERT OR IGNORE INTO sent VALUES (?,?,?)", [(sid, o, now()) for o in ocids]); self.con.commit()
+
+    def outreach_add(self, rows):
+        for r in rows:
+            cols = ",".join(r); q = ",".join("?" * len(r))
+            self.con.execute(f"INSERT OR IGNORE INTO outreach_contacts ({cols}) VALUES ({q})", tuple(r.values()))
+        self.con.commit()
+
+    def outreach_rows(self, statuses=None):
+        if statuses is None:
+            return [dict(r) for r in self.con.execute("SELECT * FROM outreach_contacts")]
+        q = ",".join("?" * len(statuses))
+        return [dict(r) for r in self.con.execute(f"SELECT * FROM outreach_contacts WHERE status IN ({q})", statuses)]
+
+    def outreach_update(self, cid, fields):
+        sets = ",".join(f"{k}=?" for k in fields)
+        self.con.execute(f"UPDATE outreach_contacts SET {sets} WHERE id=?", (*fields.values(), cid)); self.con.commit()
 
 
 class SupabaseStore:
@@ -237,6 +266,24 @@ class SupabaseStore:
             self._req("POST", "sent", [{"subscriber_id": sid, "ocid": o, "sent_at": now()} for o in ocids],
                       {"Prefer": "resolution=ignore-duplicates"})
 
+    def outreach_add(self, rows):
+        for i in range(0, len(rows), 200):
+            self._req("POST", "outreach_contacts?on_conflict=company_number", rows[i:i + 200],
+                      {"Prefer": "resolution=ignore-duplicates,return=minimal"})
+
+    def outreach_rows(self, statuses=None):
+        flt = f"status=in.({','.join(statuses)})&" if statuses is not None else ""
+        out, offset = [], 0
+        while True:
+            page = self._req("GET", f"outreach_contacts?{flt}select=*&order=created_at.desc&limit=1000&offset={offset}")
+            out += page
+            if len(page) < 1000:
+                return out
+            offset += 1000
+
+    def outreach_update(self, cid, fields):
+        self._req("PATCH", f"outreach_contacts?id=eq.{cid}", fields)
+
 
 def store():
     if os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_KEY"):
@@ -292,20 +339,75 @@ def parse_release(rel: dict) -> dict | None:
     }
 
 
+def company_number(party: dict) -> str | None:
+    """Companies House number from an OCDS party (identifier or additionalIdentifiers, scheme GB-COH)."""
+    for ident in [party.get("identifier") or {}] + (party.get("additionalIdentifiers") or []):
+        if str(ident.get("scheme", "")).upper() == "GB-COH" and ident.get("id"):
+            num = str(ident["id"]).replace(" ", "").upper()
+            num = num.zfill(8) if num.isdigit() else num
+            if len(num) == 8 and num.isalnum():
+                return num
+    return None
+
+
+def pack_for(title: str, description: str, cpvs: list[str]) -> str | None:
+    """Best sector for an award, preferring the sectors marketing leads with."""
+    n = {"title": title or "", "description": description or "", "cpvs": cpvs}
+    order = ["cleaning", "security", "grounds", "fm"] + [p for p in PACKS if p not in ("cleaning", "security", "grounds", "fm", "custom")]
+    return next((p for p in order if topical(n, p)), None)
+
+
+def parse_suppliers(rel: dict) -> list[dict]:
+    """Suppliers named on a contract award, with a Companies House number and a contact email.
+    These are public award-notice details, used only for outreach.py and its safeguards."""
+    tags = rel.get("tag", [])
+    if not any(t in tags for t in ("award", "awardUpdate", "contract", "contractUpdate")):
+        return []
+    t = rel.get("tender") or {}
+    awards = rel.get("awards") or []
+    title = (awards[0].get("title") if awards else None) or t.get("title") or ""
+    cpvs = set()
+    for c in [t.get("classification") or {}] + [it.get("classification") or {} for it in t.get("items", [])]:
+        if c.get("scheme", "").upper() == "CPV" and c.get("id"):
+            cpvs.add(str(c["id"]))
+    pack = pack_for(title, t.get("description") or "", sorted(cpvs))
+    out = []
+    for p in rel.get("parties", []):
+        if "supplier" not in p.get("roles", []):
+            continue
+        num, email = company_number(p), ((p.get("contactPoint") or {}).get("email") or "").strip().lower()
+        if not num or "@" not in email or len(email) > 254:
+            continue
+        region = str((p.get("address") or {}).get("region") or "").upper()[:3]
+        out.append({"company_number": num, "company_name": (p.get("name") or "")[:200], "email": email,
+                    "contact_name": ((p.get("contactPoint") or {}).get("name") or "")[:120] or None,
+                    "region": region if region in REGIONS else None, "pack": pack,
+                    "source_ocid": rel.get("ocid"), "award_title": title[:300]})
+    return out
+
+
 def fetch(s, days_back: int | None = None) -> int:
     start = (None if days_back else s.get_state("last_fetch")) or (
         dt.datetime.utcnow() - dt.timedelta(days=days_back or 3)).strftime("%Y-%m-%dT%H:%M:%S")
     end = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
     url = f"{FTS_URL}?{urllib.parse.urlencode({'updatedFrom': start, 'updatedTo': end, 'limit': 100})}"
-    rows = []
+    rows, suppliers = [], {}
     while url:
         pkg = http_json(url)
         rows += [r for r in (parse_release(x) for x in pkg.get("releases", [])) if r and r["ocid"]]
+        for x in pkg.get("releases", []):
+            for sup in parse_suppliers(x):
+                suppliers.setdefault(sup["company_number"], sup)
         url = (pkg.get("links") or {}).get("next")
     latest = {}
     for r in rows:  # the feed can repeat a notice (original + updates); keep the newest
         latest[r["ocid"]] = r
     s.upsert_notices(list(latest.values()))
+    if suppliers and hasattr(s, "outreach_add"):
+        try:
+            s.outreach_add(list(suppliers.values()))
+        except RuntimeError as e:  # outreach table not created yet (migration 004): alerts must keep working
+            print("outreach contacts not saved:", e)
     s.set_state("last_fetch", end)
     return len(rows)
 
@@ -404,7 +506,9 @@ def fallback_summary(n: dict) -> str:
 def sync_stripe(s) -> dict:
     """Set each subscriber's plan from active Stripe subscriptions (matched by email)."""
     key = os.environ["STRIPE_SECRET_KEY"]
-    prices = {os.environ.get("STRIPE_PRICE_STARTER"): "starter", os.environ.get("STRIPE_PRICE_PRO"): "pro"}
+    prices = {os.environ.get("STRIPE_PRICE_STARTER"): "starter", os.environ.get("STRIPE_PRICE_STARTER_ANNUAL"): "starter",
+              os.environ.get("STRIPE_PRICE_PRO"): "pro"}
+    prices.pop(None, None); prices.pop("", None)
     paid, url = {}, "https://api.stripe.com/v1/subscriptions?status=active&limit=100&expand[]=data.customer"
     while url:
         page = http_json(url, headers={"Authorization": f"Bearer {key}"})
@@ -420,18 +524,95 @@ def sync_stripe(s) -> dict:
 
 
 def apply_plans(s, paid: dict) -> dict:
-    report = {"upgraded": [], "downgraded": [], "paid_without_profile": []}
-    known = {x["email"].lower(): x for x in s.all_subscribers()}
+    """Sync plans, record founding members, and flag referral rewards for the owners to apply in Stripe."""
+    report = {"upgraded": [], "downgraded": [], "paid_without_profile": [], "new_founding_members": [],
+              "referral_rewards_due": []}
+    subs = s.all_subscribers()
+    known = {x["email"].lower(): x for x in subs}
+    by_code = {x.get("ref_code"): x for x in subs if x.get("ref_code")}
+    founding = sum(1 for x in subs if x.get("founding"))
     for email, plan in paid.items():
         sub = known.get(email)
         if not sub:
             report["paid_without_profile"].append(email)  # escalate: ask them to set an alert profile
-        elif sub["plan"] != plan:
-            s.update_subscriber(sub["id"], {"plan": plan, "status": "active"}); report["upgraded"].append(email)
+            continue
+        fields = {}
+        if sub["plan"] != plan:
+            fields.update(plan=plan, status="active"); report["upgraded"].append(email)
+        if not sub.get("founding") and founding < FOUNDING_LIMIT:
+            fields["founding"] = True; founding += 1; report["new_founding_members"].append(email)
+        ref = by_code.get(sub.get("referred_by"))
+        if ref and not sub.get("referral_flagged_at") and ref["email"].lower() != email:
+            fields["referral_flagged_at"] = now()
+            report["referral_rewards_due"].append({"referrer": ref["email"], "new_customer": email})
+        if fields:
+            s.update_subscriber(sub["id"], fields)
     for email, sub in known.items():
         if sub["plan"] in ("starter", "pro") and email not in paid:
             s.update_subscriber(sub["id"], {"plan": "free"}); report["downgraded"].append(email)
+    report["founding_members_total"] = founding
+    if founding >= FOUNDING_LIMIT:
+        report["notice"] = f"Founding offer is full ({FOUNDING_LIMIT}). Remove it from the website and terms."
     return report
+
+
+def mask(email: str) -> str:
+    """Logs from a public repo are public: never print a whole address."""
+    return "***@" + email.split("@")[-1] if "@" in (email or "") else "***"
+
+
+def log_safe(obj):
+    """Copy of a report with every email address masked."""
+    if isinstance(obj, dict):
+        return {(mask(k) if "@" in str(k) else k): log_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [log_safe(v) for v in obj]
+    return mask(obj) if isinstance(obj, str) and "@" in obj and " " not in obj else obj
+
+
+def owner_report(report: dict) -> str | None:
+    """Plain-text note for the owners when there is something to act on, else None."""
+    lines = []
+    for r in report.get("referral_rewards_due", []):
+        lines.append(f"Referral reward due: give one free month to {r['referrer']} and to {r['new_customer']} "
+                     "(Stripe > Customers > Apply coupon).")
+    for e in report.get("new_founding_members", []):
+        lines.append(f"New founding member (price locked at {PRICE_MONTHLY}/month or {PRICE_ANNUAL}/year): {e}")
+    for e in report.get("paid_without_profile", []):
+        lines.append(f"Paid in Stripe but no alert profile: {e}. Ask them to sign up on the website with the same email.")
+    if report.get("notice"):
+        lines.append(report["notice"])
+    return "\n".join(lines) or None
+
+
+def notify_owners(subject: str, text: str) -> None:
+    """Short internal note to the owners (transactional, to our own address)."""
+    if os.environ.get("RESEND_API_KEY") and os.environ.get("FROM_EMAIL"):
+        send_email(OWNER_EMAIL, subject, "<pre style='font:14px/1.5 system-ui;white-space:pre-wrap'>" + html.escape(text) + "</pre>",
+                   f"mailto:{OWNER_EMAIL}")
+    print(subject + " (details emailed to the owners; not printed because Actions logs are public)")
+
+
+# ---------------------------------------------------------------- trial
+
+TRIAL_DAYS = 14
+
+
+def _ts(v) -> dt.datetime | None:
+    if not v:
+        return None
+    t = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
+
+
+def on_trial(sub: dict, at: dt.datetime | None = None) -> bool:
+    end = _ts(sub.get("trial_ends_at"))
+    return bool(end) and (at or dt.datetime.now(dt.timezone.utc)) < end
+
+
+def gets_daily(sub: dict, at: dt.datetime | None = None) -> bool:
+    """Paid plans, and anyone still in their free trial, get the full daily digest."""
+    return sub["plan"] in ("starter", "pro") or on_trial(sub, at)
 
 
 # ---------------------------------------------------------------- double opt-in
@@ -441,8 +622,10 @@ def render_confirmation(sub: dict) -> str:
     address = html.escape(os.environ.get("POSTAL_ADDRESS", ""))
     return f"""<div style="max-width:560px;margin:auto;padding:24px;font:15px/1.6 system-ui;color:#0e1512">
     <h1 style="font:700 20px system-ui">Confirm your Bid Canary alerts</h1>
-    <p>Someone (hopefully you) asked for weekly public sector tender alerts
+    <p>Someone (hopefully you) asked for public sector tender alerts
     ({html.escape(sector_phrase(sub))}) to be sent to this address.</p>
+    <p>Once you confirm, you get {TRIAL_DAYS} days of daily alerts free, with a plain-English summary of every match.
+    After that you'll get our free weekly email unless you choose to upgrade. No card needed.</p>
     <p><a href="{link}" style="display:inline-block;background:#FFD43B;color:#0e1512;font-weight:600;padding:12px 20px;border-radius:999px;text-decoration:none">Yes, send me tenders</a></p>
     <p style="color:#475569">If this wasn't you, ignore this email and you won't hear from us again. Unconfirmed sign-ups are deleted after 7 days.</p>
     <p style="color:#475569">Bid Canary sends public sector tender alerts to businesses. Questions? Email
@@ -470,8 +653,23 @@ def money(v) -> str:
     return "Value not stated" if v in (None, "") else f"£{float(v):,.0f}"
 
 
-def render_digest(items: list[dict], sub: dict, extra_count: int = 0) -> str:
-    paid = sub["plan"] in ("starter", "pro")
+def referral_line(sub: dict) -> str:
+    if not sub.get("ref_code"):
+        return ""
+    link = f"{SITE_URL}/?ref={sub['ref_code']}"
+    return (f'<p style="font:13px/1.5 system-ui;color:#475569">Know another business that bids for public contracts? '
+            f'Send them <a href="{link}">your link</a>. When they become a paying customer, you both get a month free.</p>')
+
+
+def render_digest(items: list[dict], sub: dict, extra_count: int = 0, at: dt.datetime | None = None) -> str:
+    paid = gets_daily(sub, at)
+    trial_note = ""
+    if on_trial(sub, at) and sub["plan"] not in ("starter", "pro"):
+        end = _ts(sub["trial_ends_at"]); left = max((end - (at or dt.datetime.now(dt.timezone.utc))).days, 0)
+        trial_note = (f"""<p style="font:14px/1.5 system-ui;background:#fff6d6;padding:14px;border-radius:10px">
+        <b>Free trial: {left} day{'s' if left != 1 else ''} left</b> (ends {end:%d %B}). After that you'll get one tender a week.
+        Keep every match, every morning, for {PRICE_MONTHLY} a month or {PRICE_ANNUAL} a year.
+        <a href="{SITE_URL}/#pricing">Keep daily alerts</a></p>""")
     rows = "".join(
         f"""<tr><td style="padding:16px 0;border-bottom:1px solid #e5e7eb">
         <a href="{html.escape(i['url'])}" style="font:600 16px system-ui;color:#0e1512">{html.escape(i['title'])}</a>
@@ -482,14 +680,15 @@ def render_digest(items: list[dict], sub: dict, extra_count: int = 0) -> str:
     upsell = "" if paid else (
         f"""<p style="font:14px/1.5 system-ui;background:#fff6d6;padding:14px;border-radius:10px">
         {('<b>You have ' + str(extra_count) + ' more matching tender' + ('s' if extra_count != 1 else '') + ' this week</b> that we haven\'t shown you. ') if extra_count else 'This is your free tender of the week. '}
-        Starter sends every match the morning it's published, each with a plain-English summary like the one below, for £29 a month.
+        Starter sends every match the morning it's published, each with a plain-English summary like the one below, for {PRICE_MONTHLY} a month or {PRICE_ANNUAL} a year.
         <a href="{SITE_URL}/#pricing">Upgrade</a></p>""")
     unsub = f"{SITE_URL}/unsubscribe.html?t={sub['unsub_token']}"
     address = html.escape(os.environ.get("POSTAL_ADDRESS", ""))
     head = "today" if paid else "this week"
     return f"""<div style="max-width:600px;margin:auto;padding:24px">
     <h1 style="font:700 20px system-ui;color:#0e1512">{len(items) + extra_count} new tender{'s' if len(items) + extra_count != 1 else ''} for you {head}</h1>
-    {upsell}<table width="100%" cellspacing="0">{rows}</table>
+    {trial_note}{upsell}<table width="100%" cellspacing="0">{rows}</table>
+    {referral_line(sub)}
     <p style="font:12px system-ui;color:#64748b;margin-top:24px">{ATTRIBUTION}<br>
     Summaries are a guide; always read the full notice before bidding.<br>
     Bid Canary{(' · ' + address) if address else ''} · <a href="{unsub}">Unsubscribe</a></p></div>"""
@@ -516,13 +715,34 @@ def send_email(to: str, subject: str, html_body: str, unsub_url: str) -> None:
               {"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}", "Content-Type": "application/json"})
 
 
+def render_trial_ended(sub: dict) -> str:
+    address = html.escape(os.environ.get("POSTAL_ADDRESS", ""))
+    unsub = f"{SITE_URL}/unsubscribe.html?t={sub['unsub_token']}"
+    return f"""<div style="max-width:560px;margin:auto;padding:24px;font:15px/1.6 system-ui;color:#0e1512">
+    <h1 style="font:700 20px system-ui">Your free trial has ended</h1>
+    <p>Thanks for trying Bid Canary. From now on you'll get our free weekly email: one hand-picked
+    {html.escape(sector_phrase(sub).replace('tenders', 'tender', 1))} every Monday, plus a count of the others.</p>
+    <p>To keep getting every match the morning it's published, with a plain-English summary of each, upgrade for
+    {PRICE_MONTHLY} a month or {PRICE_ANNUAL} a year. Cancel any time.</p>
+    <p><a href="{SITE_URL}/#pricing" style="display:inline-block;background:#FFD43B;color:#0e1512;font-weight:600;padding:12px 20px;border-radius:999px;text-decoration:none">Keep daily alerts</a></p>
+    <p style="font-size:12px;color:#64748b">Bid Canary{(' · ' + address) if address else ''} · <a href="{unsub}">Unsubscribe</a></p></div>"""
+
+
 def digest(s, dry_run=False, today: dt.date | None = None, free_limit=1) -> dict:
     today = today or dt.date.today()
+    at = dt.datetime.combine(today, dt.time(6, 0), dt.timezone.utc)
     weekly = today.weekday() == 0  # Monday
     notices = s.open_notices()
     report = {}
     for sub in s.subscribers():
-        paid = sub["plan"] in ("starter", "pro")
+        paid = gets_daily(sub, at)
+        if sub.get("trial_ends_at") and not on_trial(sub, at) and not sub.get("trial_end_notified_at"):
+            if not paid:  # trial over and not upgraded: one short note, once (already-paying customers get none)
+                if not dry_run:
+                    send_email(sub["email"], "Your Bid Canary trial has ended", render_trial_ended(sub),
+                               f"{SITE_URL}/unsubscribe.html?t={sub['unsub_token']}")
+                report.setdefault("_trial_ended", []).append(sub["email"])
+            s.update_subscriber(sub["id"], {"trial_end_notified_at": now()})
         if not paid and not weekly:
             continue
         seen = s.sent_ocids(sub["id"])
@@ -543,12 +763,13 @@ def digest(s, dry_run=False, today: dt.date | None = None, free_limit=1) -> dict
         for n in shown:
             if not n.get("summary"):
                 n["summary"] = summarise(n); s.set_summary(n["ocid"], n["summary"])
-        page = render_digest(shown, sub, extra)
+        page = render_digest(shown, sub, extra, at)
         subject = f"{len(picked)} new {sector_phrase(sub)}" if len(picked) != 1 else f"1 new {sector_phrase(sub).replace('tenders', 'tender', 1)}"
         if not dry_run:
             send_email(sub["email"], f"Bid Canary: {subject}", page, f"{SITE_URL}/unsubscribe.html?t={sub['unsub_token']}")
         s.mark_sent(sub["id"], [n["ocid"] for n in picked])
-        report[sub["email"]] = {"plan": sub["plan"], "count": len(picked), "html": page}
+        report[sub["email"]] = {"plan": "trial" if on_trial(sub, at) and sub["plan"] == "free" else sub["plan"],
+                                "count": len(picked), "html": page}
     return report
 
 
@@ -563,9 +784,12 @@ if __name__ == "__main__":
     elif cmd == "confirmations":
         print(json.dumps(send_confirmations(s, dry_run="--dry-run" in sys.argv)))
     elif cmd == "sync-stripe":
-        print(json.dumps(sync_stripe(s)))
+        rep_ = sync_stripe(s); print(json.dumps(log_safe(rep_)))
+        note = owner_report(rep_)
+        if note:
+            notify_owners("Bid Canary: action needed (payments)", note)
     elif cmd == "digest":
         r = digest(s, dry_run="--dry-run" in sys.argv)
-        print(json.dumps({k: {"plan": v["plan"], "count": v["count"]} for k, v in r.items()}))
+        print(json.dumps(log_safe({k: (v if k.startswith("_") else {"plan": v["plan"], "count": v["count"]}) for k, v in r.items()})))
     else:
         print(__doc__)

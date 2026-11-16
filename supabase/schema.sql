@@ -1,5 +1,6 @@
 -- Bid Canary database schema for Supabase (Postgres).
--- Paste into Supabase > SQL Editor > New query, and run once.
+-- Paste into Supabase > SQL Editor > New query, and run once. Then run migrations/004_trial_referrals_outreach.sql
+-- (002 and 003 are already included below).
 -- Security model: the public website (anon key) can ONLY add a free signup and unsubscribe by token.
 -- Everything else is readable/writable only by the engine using the service key (GitHub secret).
 

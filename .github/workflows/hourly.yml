@@ -52,6 +52,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           STARTER_LINK: ${{ secrets.STRIPE_STARTER_LINK }}
+          STARTER_ANNUAL_LINK: ${{ secrets.STRIPE_STARTER_ANNUAL_LINK }}
           CF_ANALYTICS_TOKEN: ${{ secrets.CF_ANALYTICS_TOKEN }}
         run: |
           python - <<'PY'
@@ -59,6 +60,7 @@ jobs:
           cfg = {"supabaseUrl": os.environ.get("SUPABASE_URL", ""),
                  "supabaseAnonKey": os.environ.get("SUPABASE_ANON_KEY", ""),
                  "starterLink": os.environ.get("STARTER_LINK", ""),
+                 "starterAnnualLink": os.environ.get("STARTER_ANNUAL_LINK", ""),
                  "cfAnalyticsToken": os.environ.get("CF_ANALYTICS_TOKEN", "")}
           open("site/config.js", "w").write("window.BC_CONFIG = " + json.dumps(cfg) + ";\n")
           PY
