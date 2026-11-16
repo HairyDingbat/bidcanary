@@ -38,12 +38,14 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           STARTER_LINK: ${{ secrets.STRIPE_STARTER_LINK }}
+          CF_ANALYTICS_TOKEN: ${{ secrets.CF_ANALYTICS_TOKEN }}
         run: |
           python - <<'PY'
           import json, os
           cfg = {"supabaseUrl": os.environ.get("SUPABASE_URL", ""),
                  "supabaseAnonKey": os.environ.get("SUPABASE_ANON_KEY", ""),
-                 "starterLink": os.environ.get("STARTER_LINK", "")}
+                 "starterLink": os.environ.get("STARTER_LINK", ""),
+                 "cfAnalyticsToken": os.environ.get("CF_ANALYTICS_TOKEN", "")}
           open("site/config.js", "w").write("window.BC_CONFIG = " + json.dumps(cfg) + ";\n")
           PY
       - uses: actions/upload-pages-artifact@v3
