@@ -57,11 +57,12 @@ assert set(out) == {"paid@example.com"}, out
 assert out["paid@example.com"]["count"] == 7  # 7 open North West cleaning tenders; expired + Kent + IT excluded
 assert "Synthetic test notice" in out["paid@example.com"]["html"]  # summary shown to paid
 
-# Monday: free subscriber gets top 5 plus an upsell for the other 2, without summaries.
+# Monday: free subscriber gets one showcase tender (with its summary) and a count of the other 6.
 out = engine.digest(s, dry_run=True, today=monday)
 assert "pending@example.com" not in out  # unconfirmed sign-ups get nothing
 f = out["free@example.com"]
-assert f["count"] == 7 and "2 more matching tenders" in f["html"] and "Synthetic test notice" not in f["html"]
+assert f["count"] == 7 and "6 more matching tenders" in f["html"], f["html"]
+assert f["html"].count("Closes ") == 1  # exactly one tender shown
 assert "unsubscribe.html?t=t1" in f["html"]
 
 # No repeats.

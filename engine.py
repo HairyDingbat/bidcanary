@@ -2,7 +2,7 @@
 
 Pulls new notices from the free Find a Tender OCDS API (Open Government Licence v3.0),
 matches them to subscribers, and emails digests:
-  * free plan:    weekly digest (Mondays), top matches, no AI summaries
+  * free plan:    weekly email (Mondays), one showcase tender with its summary, plus a count of the rest
   * starter/pro:  daily digest with plain-English summaries
 
 Storage: Supabase (Postgres over its REST API) in production, SQLite locally/tests.
@@ -440,12 +440,12 @@ def render_digest(items: list[dict], sub: dict, extra_count: int = 0) -> str:
         <a href="{html.escape(i['url'])}" style="font:600 16px system-ui;color:#0e1512">{html.escape(i['title'])}</a>
         <div style="font:13px system-ui;color:#475569;margin:4px 0">{html.escape(i['buyer'] or '')} · {money(i['value'])}
         · Closes {html.escape((i['deadline'] or 'date not stated')[:10])}</div>
-        {f'<div style="font:14px/1.5 system-ui;color:#1e293b">{html.escape(i.get("summary") or "")}</div>' if paid else ''}
+        {f'<div style="font:14px/1.5 system-ui;color:#1e293b">{html.escape(i.get("summary") or "")}</div>' if i.get("summary") else ''}
         </td></tr>""" for i in items)
     upsell = "" if paid else (
         f"""<p style="font:14px/1.5 system-ui;background:#fff6d6;padding:14px;border-radius:10px">
-        {'<b>' + str(extra_count) + ' more matching tenders</b> this week. ' if extra_count else ''}
-        Get every match the morning it's published, with plain-English summaries, for £29 a month.
+        {('<b>You have ' + str(extra_count) + ' more matching tender' + ('s' if extra_count != 1 else '') + ' this week</b> that we haven\'t shown you. ') if extra_count else 'This is your free tender of the week. '}
+        Starter sends every match the morning it's published, each with a plain-English summary like the one below, for £29 a month.
         <a href="{SITE_URL}/#pricing">Upgrade</a></p>""")
     unsub = f"{SITE_URL}/unsubscribe.html?t={sub['unsub_token']}"
     address = html.escape(os.environ.get("POSTAL_ADDRESS", ""))
@@ -466,7 +466,7 @@ def send_email(to: str, subject: str, html_body: str, unsub_url: str) -> None:
               {"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}", "Content-Type": "application/json"})
 
 
-def digest(s, dry_run=False, today: dt.date | None = None, free_limit=5) -> dict:
+def digest(s, dry_run=False, today: dt.date | None = None, free_limit=1) -> dict:
     today = today or dt.date.today()
     weekly = today.weekday() == 0  # Monday
     notices = s.open_notices()
@@ -480,11 +480,19 @@ def digest(s, dry_run=False, today: dt.date | None = None, free_limit=5) -> dict
                         key=lambda n: n["deadline"] or "9999")
         if not picked:
             continue
-        shown, extra = (picked, 0) if paid else (picked[:free_limit], len(picked) - free_limit if len(picked) > free_limit else 0)
         if paid:
-            for n in shown:
-                if not n.get("summary"):
-                    n["summary"] = summarise(n); s.set_summary(n["ocid"], n["summary"])
+            shown, extra = picked, 0
+        else:
+            # Free plan: one showcase tender a week (largest stated value with at least
+            # 10 days to bid, else the first match), with its summary as a taster.
+            cutoff = (today + dt.timedelta(days=10)).isoformat()
+            roomy = [n for n in picked if (n["deadline"] or "9999") >= cutoff]
+            best = max(roomy or picked, key=lambda n: float(n["value"] or 0))
+            shown = [best] + [n for n in picked if n is not best][:max(free_limit - 1, 0)]
+            extra = len(picked) - len(shown)
+        for n in shown:
+            if not n.get("summary"):
+                n["summary"] = summarise(n); s.set_summary(n["ocid"], n["summary"])
         page = render_digest(shown, sub, extra)
         subject = f"{len(picked)} new {PACKS[sub['pack']]['label'].lower()} tender{'s' if len(picked) != 1 else ''}"
         if not dry_run:

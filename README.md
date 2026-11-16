@@ -10,7 +10,7 @@ Data: Find a Tender OCDS API (Open Government Licence v3.0).
 | `site/` | GitHub Pages | Landing page, "check your area" tool, signup, unsubscribe, privacy, terms |
 | `engine.py fetch` | GitHub Actions, hourly | Pulls new notices into Supabase, rebuilds `site/data/counts.json`, redeploys the site |
 | `engine.py sync-stripe` | GitHub Actions, daily | Sets each subscriber's plan from active Stripe subscriptions |
-| `engine.py digest` | GitHub Actions, daily 05:23 UTC | Paid: daily digest with summaries. Free: Mondays, top 5 |
+| `engine.py digest` | GitHub Actions, daily 05:23 UTC | Paid: daily digest with summaries. Free: Mondays, one showcase tender + count of the rest |
 | `supabase/schema.sql` | Supabase | Tables + row-level security (website can only insert a free signup or unsubscribe by token) |
 
 Payments use Stripe Payment Links (no server). Customers sign up free first, then upgrade with
