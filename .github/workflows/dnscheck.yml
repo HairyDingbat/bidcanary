@@ -16,6 +16,7 @@ jobs:
           echo "== CNAME www"; dig +short CNAME www.bidcanary.co.uk @1.1.1.1
           echo "== TXT _dmarc"; dig +short TXT _dmarc.bidcanary.co.uk @1.1.1.1
           echo "== NS"; dig +short NS bidcanary.co.uk @1.1.1.1
+          for h in selector1._domainkey selector2._domainkey autodiscover; do echo "== CNAME $h"; dig +short CNAME $h.bidcanary.co.uk @1.1.1.1; done
       - name: Site response
         run: |
           for u in http://bidcanary.co.uk https://bidcanary.co.uk https://www.bidcanary.co.uk https://hairydingbat.github.io/bidcanary/; do
