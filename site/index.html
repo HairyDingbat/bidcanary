@@ -170,7 +170,7 @@ footer{border-top:1px solid var(--line);padding:36px 0;font-size:14px;color:var(
     st.textContent = 'Signing you up…';
     fetch(cfg.supabaseUrl.replace(/\/$/, '') + '/rest/v1/subscribers', {
       method: 'POST',
-      headers: {'apikey': cfg.supabaseAnonKey, 'Authorization': 'Bearer ' + cfg.supabaseAnonKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal'},
+      headers: Object.assign({'apikey': cfg.supabaseAnonKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal'}, /^sb_/.test(cfg.supabaseAnonKey) ? {} : {'Authorization': 'Bearer ' + cfg.supabaseAnonKey}),
       body: JSON.stringify({email: email, pack: sp.value, regions: sr.value, consent_text: 'Signed up for weekly digest on website ' + new Date().toISOString()})
     }).then(function (r) {
       if (r.ok) {

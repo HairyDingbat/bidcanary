@@ -136,7 +136,10 @@ class SupabaseStore:
 
     def __init__(self, url: str, key: str):
         self.base = url.rstrip("/") + "/rest/v1/"
-        self.h = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        # New-style keys (sb_secret_/sb_publishable_) go in the apikey header only; legacy JWT keys also as Bearer.
+        self.h = {"apikey": key, "Content-Type": "application/json"}
+        if not key.startswith("sb_"):
+            self.h["Authorization"] = f"Bearer {key}"
 
     def _req(self, method, path, body=None, extra=None):
         data = json.dumps(body).encode() if body is not None else None

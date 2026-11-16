@@ -23,7 +23,7 @@
   if (!cfg.supabaseUrl) { msg.textContent = 'Preview only.'; return; }
   fetch(cfg.supabaseUrl.replace(/\/$/, '') + '/rest/v1/rpc/unsubscribe', {
     method: 'POST',
-    headers: {'apikey': cfg.supabaseAnonKey, 'Authorization': 'Bearer ' + cfg.supabaseAnonKey, 'Content-Type': 'application/json'},
+    headers: Object.assign({'apikey': cfg.supabaseAnonKey, 'Content-Type': 'application/json'}, /^sb_/.test(cfg.supabaseAnonKey) ? {} : {'Authorization': 'Bearer ' + cfg.supabaseAnonKey}),
     body: JSON.stringify({token: t})
   }).then(function (r) { return r.json(); }).then(function (ok) {
     msg.textContent = ok ? 'Done. You won’t get any more Bid Canary digests.' : 'We couldn’t find that subscription; it may already be cancelled.';
