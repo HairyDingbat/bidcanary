@@ -13,6 +13,14 @@ import urllib.error
 import urllib.request
 import uuid
 
+missing = [k for k in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY") if not os.environ.get(k)]
+for k in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY"):
+    v = os.environ.get(k, "")
+    shape = ("missing" if not v else "https URL" if v.startswith("https://") else
+             v.split("_")[0] + "_" + v.split("_")[1] + "_..." if v.startswith("sb_") else "eyJ... (legacy)" if v.startswith("eyJ") else "unexpected format")
+    print(f"SECRET {k}: {shape}")
+if missing:
+    print("FAIL secrets missing or misnamed: " + ", ".join(missing)); sys.exit(1)
 URL = os.environ["SUPABASE_URL"].rstrip("/") + "/rest/v1/"
 PUB = os.environ["SUPABASE_ANON_KEY"]
 SEC = os.environ["SUPABASE_SERVICE_KEY"]
