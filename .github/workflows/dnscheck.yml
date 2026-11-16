@@ -1,0 +1,23 @@
+name: DNS and site check (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: DNS records
+        run: |
+          for t in A AAAA MX TXT; do echo "== $t bidcanary.co.uk"; dig +short $t bidcanary.co.uk @1.1.1.1; done
+          echo "== CNAME www"; dig +short CNAME www.bidcanary.co.uk @1.1.1.1
+          echo "== TXT _dmarc"; dig +short TXT _dmarc.bidcanary.co.uk @1.1.1.1
+          echo "== NS"; dig +short NS bidcanary.co.uk @1.1.1.1
+      - name: Site response
+        run: |
+          for u in http://bidcanary.co.uk https://bidcanary.co.uk https://www.bidcanary.co.uk https://hairydingbat.github.io/bidcanary/; do
+            echo "== $u"; curl -s -o /dev/null -w "%{http_code} -> %{redirect_url}\n" --max-time 20 "$u" || echo "no response"
+          done
