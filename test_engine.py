@@ -66,4 +66,14 @@ assert c["packs"]["cleaning"]["regions"]["UKD"]["count"] == 7
 assert c["packs"]["cleaning"]["regions"]["UKJ"]["count"] == 1
 assert c["packs"]["security"]["regions"]["UKD"]["count"] == 1
 assert "email" not in json.dumps(c)
+# Duplicate releases of the same notice in one fetch are collapsed before saving.
+class Rec(engine.SQLiteStore):
+    def upsert_notices(self, rows):
+        assert len({r["ocid"] for r in rows}) == len(rows), "duplicate ocids sent"
+        super().upsert_notices(rows)
+r2 = Rec(tempfile.mktemp(suffix=".db"))
+pkg = {"releases": [rel("dup", "Cleaning v1", "90919200", "UKD3", 1, future), rel("dup", "Cleaning v2", "90919200", "UKD3", 2, future)], "links": {}}
+engine.http_json = lambda url, *a, **k: pkg
+engine.fetch(r2)
+assert [n["title"] for n in r2.open_notices()] == ["Cleaning v2"]
 print("all tests passed")

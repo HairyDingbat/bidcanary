@@ -156,7 +156,11 @@ class SupabaseStore:
 
     def _req(self, method, path, body=None, extra=None):
         data = json.dumps(body).encode() if body is not None else None
-        return http_json(self.base + path, data, {**self.h, **(extra or {})}, method)
+        try:
+            return http_json(self.base + path, data, {**self.h, **(extra or {})}, method, tries=2)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:300]
+            raise RuntimeError(f"Supabase {method} {path.split('?')[0]} failed: {e.code} {detail}") from None
 
     def get_state(self, k):
         r = self._req("GET", f"state?k=eq.{urllib.parse.quote(k)}&select=v")
@@ -248,7 +252,10 @@ def fetch(s) -> int:
         pkg = http_json(url)
         rows += [r for r in (parse_release(x) for x in pkg.get("releases", [])) if r and r["ocid"]]
         url = (pkg.get("links") or {}).get("next")
-    s.upsert_notices(rows)
+    latest = {}
+    for r in rows:  # the feed can repeat a notice (original + updates); keep the newest
+        latest[r["ocid"]] = r
+    s.upsert_notices(list(latest.values()))
     s.set_state("last_fetch", end)
     return len(rows)
 
