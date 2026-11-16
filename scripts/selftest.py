@@ -19,6 +19,9 @@ for k in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY"):
     shape = ("missing" if not v else "https URL" if v.startswith("https://") else
              v.split("_")[0] + "_" + v.split("_")[1] + "_..." if v.startswith("sb_") else "eyJ... (legacy)" if v.startswith("eyJ") else "unexpected format")
     print(f"SECRET {k}: {shape}")
+site = os.environ.get("SITE_URL", "")  # SITE_URL check
+print("SECRET SITE_URL: " + ("missing" if not site else "correct (https://bidcanary.co.uk)" if site.rstrip("/") == "https://bidcanary.co.uk"
+      else "set but not https://bidcanary.co.uk (length %d, starts %s)" % (len(site), site[:8])))
 if missing:
     print("FAIL secrets missing or misnamed: " + ", ".join(missing)); sys.exit(1)
 URL = os.environ["SUPABASE_URL"].rstrip("/") + "/rest/v1/"
