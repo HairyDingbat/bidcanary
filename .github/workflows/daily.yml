@@ -2,7 +2,7 @@ name: Daily - sync payments and send digests
 
 on:
   schedule:
-    - cron: "23 5 * * *"   # 05:23 UTC, so emails land before 7am UK time (GitHub may run it late)
+    - cron: "25 5 * * *"   # 05:23 UTC, so emails land before 7am UK time (GitHub may run it late)
   workflow_dispatch:
     inputs:
       dry_run:
