@@ -58,3 +58,4 @@ grant execute on function unsubscribe(uuid) to anon;
 create or replace function prune_old_notices() returns void language sql as $$
   delete from notices where deadline < now() - interval '18 months';
 $$;
+revoke all on function prune_old_notices() from public, anon, authenticated;
