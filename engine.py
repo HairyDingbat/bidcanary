@@ -58,12 +58,25 @@ def now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
-def http_json(url: str, data: bytes | None = None, headers: dict | None = None, method: str | None = None):
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers={"User-Agent": "BidCanary/0.2", **(headers or {})})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        body = r.read()
-        return json.loads(body) if body else None
+def http_json(url: str, data: bytes | None = None, headers: dict | None = None, method: str | None = None,
+              tries: int = 4):
+    """JSON request with retries on timeouts, rate limits and server errors."""
+    import time
+    for attempt in range(tries):
+        req = urllib.request.Request(url, data=data, method=method,
+                                     headers={"User-Agent": "BidCanary/0.2", **(headers or {})})
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r:
+                body = r.read()
+                return json.loads(body) if body else None
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < tries - 1:
+                time.sleep(int(e.headers.get("Retry-After") or 5 * (attempt + 1))); continue
+            raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt < tries - 1:
+                time.sleep(5 * (attempt + 1)); continue
+            raise
 
 
 # ---------------------------------------------------------------- storage
