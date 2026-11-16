@@ -198,13 +198,70 @@ c1 = so.outreach_rows(["checked"])[0]
 tender, count, where = outreach.hook(so.open_notices(), "cleaning", "UKD", monday)
 assert count == 7 and where == "the North West" and tender["value"] == 100006
 assert outreach.place("UKI") == "London" and outreach.place(None) == "the UK"
-subj, body = outreach.render(c1, tender, count, where, follow_up=False)
+subj, body, hbody = outreach.render(c1, tender, count, where, follow_up=False)
 assert subj == "7 open cleaning tenders in the North West"
 assert "Public records show Co" in body and "I saw" not in body
+assert "optout.html?t=tok" in hbody and "Try it free for 14 days" in hbody and "<img" not in hbody and "Public records show Co" in hbody
 assert "optout.html?t=tok" in body and "named as a supplier on a public contract award" in body and "14 days" in body
-subj2, body2 = outreach.render(c1, tender, count, where, follow_up=True)
+subj2, body2, _ = outreach.render(c1, tender, count, where, follow_up=True)
 assert subj2.startswith("Following up") and "won't email again" in body2 and not subj2.lower().startswith("re:")
-msg = outreach.build_message(c1, subj, body)
+msg = outreach.build_message(c1, subj, body, hbody)
 assert "optout.html" in msg["List-Unsubscribe"] and msg["To"] == c1["email"]
+assert msg.is_multipart() and [x.get_content_type() for x in msg.iter_parts()] == ["text/plain", "text/html"]
+evil = dict(c1, company_name="<script>x</script> Ltd")
+assert "<script>" not in outreach.render(evil, tender, count, where, False)[2]           # everything escaped
 assert outreach.mask("jane@sparkle.co.uk").startswith("***@")
+
+# ---- Never the same people twice: simulate 8 weeks of daily runs (with repeat runs and a clean-up).
+sim = engine.SQLiteStore(tempfile.mktemp(suffix=".db"))
+sim.upsert_notices([engine.parse_release(r) for r in fixture])
+far = (dt.date.today() + dt.timedelta(days=400)).isoformat() + "T12:00:00Z"   # keep a tender open for the whole run
+sim.upsert_notices([engine.parse_release(rel("ocds-long", "Long cleaning", "90919200", "UKD3", 5, far))])
+contacts = [mk(i, f"person{i % 15}@firm{i % 15}.co.uk") for i in range(1, 31)]  # 30 rows, only 15 distinct firms/domains
+contacts += [mk(31, "boss@firm1.co.uk"), mk(32, "ops@colleague.co.uk"), mk(33, "jo@subscriber.co.uk")]
+for i, c in enumerate(contacts):
+    c["company_number"] = f"{i + 1:08d}"; c["created_at"] = "2026-11-10T00:00:00"
+sim.outreach_add(contacts)
+sim.insert_subscriber({"id": "ss", "email": "boss@subscriber.co.uk", "pack": "cleaning", "regions": "", "plan": "starter",
+                       "status": "active", "unsub_token": "q", "created_at": "now"})
+os.environ.update(OUTREACH_ENABLED="true", OUTREACH_APPROVED_VERSION=outreach.TEMPLATE_VERSION, COMPANY_LINE="X Ltd",
+                  POSTAL_ADDRESS="1 Road", OUTREACH_MAILBOX="o@bc.co.uk", OUTREACH_SENDER_NAME="Oscar",
+                  MS_TENANT_ID="t", MS_CLIENT_ID="c", MS_CLIENT_SECRET="s", OUTREACH_DAILY_LIMIT="4")
+sends = []
+outreach.graph_token = lambda: "tok"
+outreach.graph_send = lambda tok, m: sends.append((m["To"], m["Subject"], day))
+day = dt.date(2026, 11, 16)
+for _ in range(56):
+    for _run in range(3):                                      # someone presses "Run workflow" twice more
+        outreach.send(sim, today=day, pause_between=(0, 0))
+    if day == dt.date(2026, 12, 7):                            # 12-month clean-up deletes the contact rows...
+        sim.outreach_delete_older_than("2099-01-01")
+        sim.outreach_add([dict(c, id=c["id"] + "b", optout_token=c["optout_token"] + "b") for c in contacts])  # ...and they win again
+        outreach.check.__globals__["companies_house"] = lambda n: {"type": "ltd", "company_status": "active"}
+        os.environ["COMPANIES_HOUSE_API_KEY"] = "k"
+        outreach.time.sleep = lambda x: None
+        for c in sim.outreach_rows(["checked"]):
+            sim.outreach_update(c["id"], {"status": "new"})
+        outreach.check(sim)
+    day += dt.timedelta(days=1)
+per_addr, per_domain = {}, {}
+for to, subj, _d in sends:
+    per_addr[to] = per_addr.get(to, 0) + 1
+    per_domain[outreach.domain(to)] = per_domain.get(outreach.domain(to), 0) + 1
+assert max(per_addr.values()) == 2 and max(per_domain.values()) == 2, (per_addr, per_domain)   # first email + one follow-up, ever
+assert len(per_domain) == 16, per_domain                                   # 15 firms + colleague.co.uk; subscriber's domain never
+assert "subscriber.co.uk" not in per_domain
+by_day = {}
+for *_x, d in sends:
+    by_day[d] = by_day.get(d, 0) + 1
+assert max(by_day.values()) <= 4, by_day                                   # daily cap holds across 3 runs a day
+assert len(sends) == 32 and sum(1 for s_ in sends if s_[1].startswith("Following up")) == 16, len(sends)
+assert sim.outreach_rows(["skipped"]) and all("already contacted" in c["skip_reason"] for c in sim.outreach_rows(["skipped"])
+                                              if c["id"].endswith("b") and c["email"] not in ("jo@subscriber.co.uk",))
+# A reply cancels the follow-up and blocks the domain.
+r2 = engine.SQLiteStore(tempfile.mktemp(suffix=".db")); r2.upsert_notices([engine.parse_release(rel("ocds-long", "Long cleaning", "90919200", "UKD3", 5, far))])
+r2.outreach_add([mk(1, "a@reply.co.uk", "emailed", emailed_at="2026-11-02T09:00:00+00:00", company_number="11111111"),
+                 mk(2, "b@reply.co.uk", company_number="22222222")])
+r2.outreach_update("o1", {"status": "replied", "responded_at": "2026-11-03"}); r2.suppress(outreach.keys_for(r2.outreach_rows()[0]), "replied")
+assert outreach.plan_batch(r2, dt.date(2026, 11, 16)) == []
 print("all tests passed")

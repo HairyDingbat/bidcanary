@@ -118,6 +118,7 @@ class SQLiteStore:
       source_ocid TEXT, award_title TEXT, company_type TEXT, status TEXT DEFAULT 'new', skip_reason TEXT, subject TEXT,
       emailed_at TEXT, followed_up_at TEXT, responded_at TEXT,
       optout_token TEXT DEFAULT (lower(hex(randomblob(16)))), created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS outreach_suppression (key TEXT PRIMARY KEY, reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS sent (subscriber_id TEXT, ocid TEXT, sent_at TEXT, PRIMARY KEY (subscriber_id, ocid));
     CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT);
     """
@@ -195,6 +196,17 @@ class SQLiteStore:
     def outreach_update(self, cid, fields):
         sets = ",".join(f"{k}=?" for k in fields)
         self.con.execute(f"UPDATE outreach_contacts SET {sets} WHERE id=?", (*fields.values(), cid)); self.con.commit()
+
+    def outreach_delete_older_than(self, iso):  # local stand-in for the database's prune_outreach()
+        self.con.execute("DELETE FROM outreach_contacts WHERE status IN ('new','checked','skipped','emailed','followed_up') "
+                         "AND created_at < ?", (iso,)); self.con.commit()
+
+    def suppression_keys(self):
+        return {r["key"] for r in self.con.execute("SELECT key FROM outreach_suppression")}
+
+    def suppress(self, keys, reason):
+        self.con.executemany("INSERT OR IGNORE INTO outreach_suppression (key, reason) VALUES (?,?)", [(k, reason) for k in keys])
+        self.con.commit()
 
 
 class SupabaseStore:
@@ -283,6 +295,20 @@ class SupabaseStore:
 
     def outreach_update(self, cid, fields):
         self._req("PATCH", f"outreach_contacts?id=eq.{cid}", fields)
+
+    def suppression_keys(self):
+        out, offset = set(), 0
+        while True:
+            page = self._req("GET", f"outreach_suppression?select=key&limit=1000&offset={offset}")
+            out |= {r["key"] for r in page}
+            if len(page) < 1000:
+                return out
+            offset += 1000
+
+    def suppress(self, keys, reason):
+        if keys:
+            self._req("POST", "outreach_suppression?on_conflict=key", [{"key": k, "reason": reason} for k in keys],
+                      {"Prefer": "resolution=ignore-duplicates,return=minimal"})
 
 
 def store():

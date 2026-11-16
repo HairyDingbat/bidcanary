@@ -1,5 +1,6 @@
 -- Migration 004: 14-day trial, annual plan support, founding members, referrals, cold outreach.
 -- Run once in Supabase > SQL Editor. Safe to re-run.
+create extension if not exists pgcrypto;
 
 -- ---------------------------------------------------------------- trial, founding, referrals
 alter table subscribers add column if not exists trial_ends_at timestamptz;
@@ -54,18 +55,38 @@ create index if not exists outreach_contacts_status on outreach_contacts (status
 alter table outreach_contacts enable row level security;
 revoke all on outreach_contacts from anon, authenticated;
 
+-- Permanent "never contact again" list. Survives the 12-month clean-up, so nobody is emailed twice.
+-- Holds one-way SHA-256 codes only (of the email, its domain and the company number), not readable details.
+create table if not exists outreach_suppression (
+  key text primary key check (key ~ '^[edc]:[0-9a-f]{64}$'),
+  reason text,
+  created_at timestamptz not null default now()
+);
+alter table outreach_suppression enable row level security;
+revoke all on outreach_suppression from anon, authenticated;
+
 -- Opt-out link in every outreach email: works with the secret token, reveals nothing.
+-- Also adds the email, its domain and the company to the permanent suppression list.
 create or replace function outreach_optout(token uuid) returns boolean
-language sql security definer set search_path = public as $$
-  with u as (update outreach_contacts set status = 'opted_out', responded_at = coalesce(responded_at, now())
-              where optout_token = token returning 1)
-  select exists (select 1 from u);
+language plpgsql security definer set search_path = public as $$
+declare c outreach_contacts;
+begin
+  update outreach_contacts set status = 'opted_out', responded_at = coalesce(responded_at, now())
+   where optout_token = token returning * into c;
+  if c.id is null then return false; end if;
+  insert into outreach_suppression (key, reason) values
+    ('e:' || encode(digest(lower(c.email), 'sha256'), 'hex'), 'opted_out'),
+    ('d:' || encode(digest(lower(split_part(c.email, '@', 2)), 'sha256'), 'hex'), 'opted_out'),
+    ('c:' || encode(digest(upper(c.company_number), 'sha256'), 'hex'), 'opted_out')
+  on conflict (key) do nothing;
+  return true;
+end;
 $$;
 revoke all on function outreach_optout(uuid) from public;
 grant execute on function outreach_optout(uuid) to anon;
 
--- Retention: drop contacts we never heard back from after 12 months. Opt-outs and bounces are kept
--- so we never email them again (suppression list).
+-- Retention: drop contacts we never heard back from after 12 months. The suppression list above is kept,
+-- so a deleted contact can't be collected and emailed again.
 create or replace function prune_outreach() returns void language sql as $$
   delete from outreach_contacts
    where status in ('new', 'checked', 'skipped', 'emailed', 'followed_up')

@@ -33,8 +33,17 @@ the same email; the daily sync matches them by email.
 The hourly fetch saves suppliers named on contract award notices (only those with a Companies House number
 and an email). The weekday job then: checks each with Companies House (active Ltd/PLC/LLP only; webmail and
 public-sector addresses skipped), reads the outreach mailbox for replies, opt-outs and bounces, and sends up to
-`OUTREACH_DAILY_LIMIT` (default 25, hard cap 50) plain-text emails: one first email naming a live tender in
-their sector and area, and at most one follow-up 7 days later. One contact per company and per email domain.
+`OUTREACH_DAILY_LIMIT` (default 25, hard cap 50, counted across every run that day) branded emails with a
+plain-text version: one first email naming a live tender in their sector and area, and at most one follow-up
+7 days later.
+
+**Never the same people twice:** each company, address and email domain gets one first email and at most one
+follow-up, ever. On sending, one-way codes of the email, domain and company number go into the permanent
+`outreach_suppression` table, which the 12-month clean-up does not touch, so a company that wins another
+contract later is not contacted again. Replies, opt-outs and bounces cancel the follow-up. Firms with any
+subscriber at the same domain are never cold-emailed. Contacts are marked as emailed before the send, so a
+failure means one email too few, never one too many. `test_engine.py` simulates 8 weeks of runs (three a day,
+with a clean-up in between) to prove it.
 It pauses itself if bounces pass 5% or opt-outs pass 4%. It never prints names or addresses (logs are public).
 
 It sends nothing until **all** of these are set:
@@ -42,7 +51,7 @@ It sends nothing until **all** of these are set:
 | Where | Name | Value |
 |---|---|---|
 | Variable | `OUTREACH_ENABLED` | `true` (set to anything else to stop at once) |
-| Variable | `OUTREACH_APPROVED_VERSION` | the `TEMPLATE_VERSION` in outreach.py, after reading a dry-run preview |
+| Variable | `OUTREACH_APPROVED_VERSION` | the `TEMPLATE_VERSION` in outreach.py (now `v2`), after reading a dry-run preview |
 | Variable | `OUTREACH_MAILBOX` | the outreach mailbox, ideally on a separate domain from support@ |
 | Variable | `OUTREACH_SENDER_NAME` | e.g. `Oscar Rudd` |
 | Variable | `COMPANY_LINE` | e.g. `Bid Canary is a trading name of Example Ltd, company number 12345678, registered in England and Wales` |

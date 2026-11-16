@@ -4,9 +4,17 @@ Who it emails: suppliers named on UK public contract award notices (collected by
 only where Companies House confirms an ACTIVE limited company, PLC or LLP (PECR "corporate subscribers").
 Sole traders and ordinary partnerships are never emailed. Webmail and public-sector addresses are skipped.
 
-What it sends: one plain-text email naming a live tender in their sector and area, and at most one
-follow-up 5 working days later. Every email names the company, gives its postal address and an opt-out link.
-Replies, opt-outs and bounces stop all further email to that company (and to its email domain).
+What it sends: one email (branded HTML with a plain-text version) naming a live tender in their sector and
+area, and at most one follow-up 5 working days later. Every email names the company, gives its postal address
+and an opt-out link.
+
+Never the same people twice: each company, email address and email domain gets one first email and at most
+one follow-up, EVER. Once someone is emailed, one-way codes of their email, domain and company number go on a
+permanent suppression list that survives the 12-month clean-up, so a company that wins another contract later
+is not contacted again. Replies, opt-outs and bounces cancel the follow-up. Companies that already subscribe
+(any colleague at the same domain) are never cold-emailed. The daily cap counts every email sent that day,
+however many times the job runs, and a contact is marked as emailed before the send, so a failure can only
+ever mean one email too few, never one too many.
 
 It only sends when ALL of these are true (otherwise it explains what's missing and exits quietly):
   * repo variable OUTREACH_ENABLED = true
@@ -29,6 +37,8 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import hashlib
+import html
 import json
 import os
 import random
@@ -43,7 +53,7 @@ from email.utils import formataddr
 
 import engine
 
-TEMPLATE_VERSION = "v1"   # bump whenever the wording below changes; the owners approve by setting OUTREACH_APPROVED_VERSION
+TEMPLATE_VERSION = "v2"   # bump whenever the wording below changes; the owners approve by setting OUTREACH_APPROVED_VERSION
 HARD_DAILY_MAX = 50       # never more than this per day, whatever the setting says
 FOLLOW_UP_AFTER_DAYS = 7  # calendar days (= 5 working days)
 WEBMAIL = {"gmail.com", "googlemail.com", "hotmail.com", "hotmail.co.uk", "outlook.com", "live.com", "live.co.uk",
@@ -70,6 +80,15 @@ def mask(email: str) -> str:
 
 def domain(email: str) -> str:
     return (email or "").rsplit("@", 1)[-1].lower()
+
+
+def keys_for(c: dict) -> set[str]:
+    """Permanent suppression codes for a contact: email, email domain, company number (one-way SHA-256)."""
+    h = lambda v: hashlib.sha256(v.encode()).hexdigest()
+    keys = {"e:" + h(c["email"].lower()), "c:" + h(str(c["company_number"]).upper())}
+    if domain(c["email"]) not in WEBMAIL:
+        keys.add("d:" + h(domain(c["email"])))
+    return keys
 
 
 def screen(email: str) -> str | None:
@@ -103,10 +122,14 @@ def check(s, limit: int = 300) -> dict:
     if not env("COMPANIES_HOUSE_API_KEY"):
         return {"skipped": "COMPANIES_HOUSE_API_KEY not set"}
     subs = {x["email"].lower() for x in s.all_subscribers()}
-    out = {"checked": 0, "skipped": 0, "converted": 0}
+    suppressed = s.suppression_keys()
+    out = {"checked": 0, "skipped": 0, "converted": 0, "already_contacted": 0}
     for c in s.outreach_rows(["new"])[:limit]:
         if c["email"] in subs:
             s.outreach_update(c["id"], {"status": "converted"}); out["converted"] += 1; continue
+        if keys_for(c) & suppressed:
+            s.outreach_update(c["id"], {"status": "skipped", "skip_reason": "already contacted (permanent suppression list)"})
+            out["already_contacted"] += 1; continue
         reason = screen(c["email"])
         if not reason:
             info = companies_house(c["company_number"])
@@ -190,6 +213,7 @@ def inbox(s) -> dict:
         if hit and hit[1]["status"] != hit[0]:
             status, c = hit
             s.outreach_update(c["id"], {"status": status, "responded_at": engine.now()})
+            s.suppress(keys_for(c), status)
             c["status"] = status; out[status] += 1
     s.set_state("outreach_inbox_since", started)
     return out
@@ -244,54 +268,104 @@ def sector_word(pack: str) -> str:
     return engine.sector_phrase({"pack": pack}).replace(" tenders", "")
 
 
-def render(c: dict, tender: dict, count: int, where: str, follow_up: bool) -> tuple[str, str]:
-    """(subject, plain-text body). Changing any wording here means bumping TEMPLATE_VERSION."""
-    hello = f"Hi {first_name(c.get('contact_name'))}," if first_name(c.get("contact_name")) else "Hello,"
+def parts(c: dict, tender: dict, count: int, where: str, follow_up: bool) -> dict:
+    """The wording, once, so the HTML and plain-text versions always say the same thing.
+    Changing any wording or layout means bumping TEMPLATE_VERSION (the owners then approve it again)."""
     sector = sector_word(c["pack"])
-    close = engine._ts(tender["deadline"]).strftime("%-d %B") if tender.get("deadline") else "soon"
-    value = "" if tender.get("value") in (None, "") else f", worth {engine.money(tender['value'])}"
-    trial = f"{engine.SITE_URL}/?sector={c['pack']}#signup"
-    optout = f"{engine.SITE_URL}/optout.html?t={c['optout_token']}"
-    sig = "\n".join(x for x in (env("OUTREACH_SENDER_NAME"), "Bid Canary", env("COMPANY_LINE"), env("POSTAL_ADDRESS")) if x)
-    footer = (f"You're getting this because {c['company_name']} is named as a supplier on a public contract award "
-              f"notice. If you'd rather not hear from us, use this link and we won't email you again: {optout} "
-              "(or just reply \"no thanks\").")
+    name = first_name(c.get("contact_name"))
+    close = engine._ts(tender["deadline"]).strftime("%-d %B %Y") if tender.get("deadline") else "date not stated"
+    p = {
+        "hello": f"Hi {name}," if name else "Hello,",
+        "tender": {"title": tender["title"], "buyer": tender.get("buyer") or "", "close": close, "url": tender["url"],
+                   "value": "" if tender.get("value") in (None, "") else engine.money(tender["value"])},
+        "cta": ("Try it free for 14 days", f"{engine.SITE_URL}/?sector={c['pack']}#signup"),
+        "cta_note": "No card needed. Cancel any time.",
+        "sig": [x for x in (env("OUTREACH_SENDER_NAME"), "Bid Canary") if x],
+        "legal": [x for x in (env("COMPANY_LINE"), env("POSTAL_ADDRESS")) if x],
+        "why": f"You're getting this because {c['company_name']} is named as a supplier on a public contract award notice.",
+        "optout": f"{engine.SITE_URL}/optout.html?t={c['optout_token']}",
+    }
     if not follow_up:
-        subject = f"{count} open {sector} tenders in {where}"
-        body = f"""{hello}
-
-Public records show {c['company_name']} recently won "{c['award_title']}". Congratulations.
-
-There's a new one you might want to look at: "{tender['title']}" for {tender['buyer']}{value}, closing {close}.
-{tender['url']}
-
-It's one of {count} open {sector} tenders in {where} right now. Bid Canary sends every new one to your inbox each morning, with a plain-English summary of each. You can try it free for 14 days, with no card needed:
-{trial}
-
-{sig}
-
-{footer}
-"""
+        p["subject"] = f"{count} open {sector} tenders in {where}"
+        p["before"] = [f'Public records show {c["company_name"]} recently won "{c["award_title"]}". Congratulations.',
+                       "There's a new one you might want to look at:"]
+        p["after"] = [f"It's one of {count} open {sector} tenders in {where} right now. Bid Canary sends every new one "
+                      "to your inbox each morning, with a plain-English summary of each."]
+        p["closing"] = []
     else:
-        subject = f"Following up: {sector} tenders in {where}"
-        body = f"""{hello}
-
-Just following up in case my last email got buried. "{tender['title']}" for {tender['buyer']} closes {close}:
-{tender['url']}
-
-If it's useful, the 14-day free trial sends you every new {sector} tender in {where} each morning:
-{trial}
-
-I won't email again after this.
-
-{sig}
-
-{footer}
-"""
-    return subject, body
+        p["subject"] = f"Following up: {sector} tenders in {where}"
+        p["before"] = ["Just following up in case my last email got buried. This one is still open:"]
+        p["after"] = [f"If it's useful, the free trial sends you every new {sector} tender in {where} each morning."]
+        p["closing"] = ["I won't email again after this."]
+    return p
 
 
-def build_message(c: dict, subject: str, body: str, to: str | None = None) -> EmailMessage:
+def render_text(p: dict) -> str:
+    t = p["tender"]
+    meta = " · ".join(x for x in (t["buyer"], t["value"], f"closes {t['close']}") if x)
+    lines = [p["hello"], "", *sum(([x, ""] for x in p["before"]), []),
+             f'"{t["title"]}"', meta, t["url"], "",
+             *sum(([x, ""] for x in p["after"]), []),
+             f"{p['cta'][0]} ({p['cta_note']}):", p["cta"][1], "",
+             *sum(([x, ""] for x in p["closing"]), []),
+             *p["sig"], *p["legal"], "",
+             f"{p['why']} If you'd rather not hear from us, use this link and we won't email you again: "
+             f"{p['optout']} (or just reply \"no thanks\")."]
+    return "\n".join(lines) + "\n"
+
+
+def render_html(p: dict) -> str:
+    """Branded but light: no images, no tracking pixel, table layout so Outlook renders it."""
+    e = html.escape
+    t = p["tender"]
+    para = lambda x: f'<p style="margin:0 0 16px">{e(x)}</p>'
+    meta = " &middot; ".join(e(x) for x in (t["buyer"], t["value"]) if x)
+    return f"""<!DOCTYPE html>
+<html lang="en-GB"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light"><title>{e(p['subject'])}</title></head>
+<body style="margin:0;padding:0;background:#F6F5EF">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#F6F5EF"><tr><td align="center" style="padding:24px 12px">
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:580px;background:#ffffff;border:1px solid #E3E1D6;border-radius:14px">
+<tr><td style="padding:22px 32px 0">
+  <table role="presentation" cellspacing="0" cellpadding="0"><tr>
+    <td style="width:12px;height:12px;background:#FFD43B;border-radius:3px;font-size:0;line-height:0">&nbsp;</td>
+    <td style="padding-left:9px;font:800 17px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0E1512;letter-spacing:-0.3px">Bid Canary</td>
+  </tr></table>
+</td></tr>
+<tr><td style="padding:22px 32px 8px;font:15px/1.6 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0E1512">
+  <p style="margin:0 0 16px">{e(p['hello'])}</p>
+  {''.join(para(x) for x in p['before'])}
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:0 0 18px;border:1px solid #E3E1D6;border-left:4px solid #FFD43B;border-radius:8px;background:#FBFAF6">
+  <tr><td style="padding:14px 16px">
+    <div style="font:700 15px/1.4 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0E1512">{e(t['title'])}</div>
+    <div style="font:13px/1.5 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#3D4A44;margin-top:4px">{meta}</div>
+    <div style="font:600 13px/1.5 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0E1512;margin-top:2px">Closes {e(t['close'])}</div>
+    <div style="margin-top:8px"><a href="{e(t['url'])}" style="font:600 13px -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0F3D2E">Read the full notice on Find a Tender &rarr;</a></div>
+  </td></tr></table>
+  {''.join(para(x) for x in p['after'])}
+  <table role="presentation" cellspacing="0" cellpadding="0" style="margin:4px 0 6px"><tr>
+    <td style="background:#FFD43B;border-radius:999px"><a href="{e(p['cta'][1])}" style="display:inline-block;padding:12px 22px;font:700 15px -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0E1512;text-decoration:none">{e(p['cta'][0])}</a></td>
+  </tr></table>
+  <p style="margin:0 0 18px;font-size:13px;color:#5B6762">{e(p['cta_note'])}</p>
+  {''.join(para(x) for x in p['closing'])}
+  <p style="margin:0">{'<br>'.join(e(x) for x in p['sig'])}</p>
+</td></tr>
+<tr><td style="padding:18px 32px 24px;border-top:1px solid #E3E1D6;font:12px/1.55 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#5B6762">
+  {('<p style="margin:0 0 8px">' + '<br>'.join(e(x) for x in p['legal']) + '</p>') if p['legal'] else ''}
+  <p style="margin:0">{e(p['why'])} If you'd rather not hear from us, <a href="{e(p['optout'])}" style="color:#5B6762">click here and we won't email you again</a>, or just reply &ldquo;no thanks&rdquo;.</p>
+</td></tr>
+</table>
+</td></tr></table>
+</body></html>"""
+
+
+def render(c: dict, tender: dict, count: int, where: str, follow_up: bool) -> tuple[str, str, str]:
+    """(subject, plain text, html)."""
+    p = parts(c, tender, count, where, follow_up)
+    return p["subject"], render_text(p), render_html(p)
+
+
+def build_message(c: dict, subject: str, body: str, html_body: str | None = None, to: str | None = None) -> EmailMessage:
     m = EmailMessage()
     mbx = env("OUTREACH_MAILBOX")
     m["From"] = formataddr((env("OUTREACH_SENDER_NAME") or "Bid Canary", mbx))
@@ -299,6 +373,8 @@ def build_message(c: dict, subject: str, body: str, to: str | None = None) -> Em
     m["Subject"] = subject
     m["List-Unsubscribe"] = f"<{engine.SITE_URL}/optout.html?t={c['optout_token']}>, <mailto:{mbx}?subject=unsubscribe>"
     m.set_content(body)
+    if html_body:
+        m.add_alternative(html_body, subtype="html")
     return m
 
 
@@ -314,28 +390,41 @@ def blockers() -> list[str]:
     return missing
 
 
+def sent_on(rows: list[dict], day: dt.date) -> int:
+    d = day.isoformat()
+    return sum((c.get("emailed_at") or "").startswith(d) for c in rows) + sum((c.get("followed_up_at") or "").startswith(d) for c in rows)
+
+
 def plan_batch(s, today: dt.date) -> list[tuple[dict, bool]]:
-    """Today's (contact, is_follow_up) list: follow-ups first, then new contacts. One per company and per domain."""
-    limit = min(int(env("OUTREACH_DAILY_LIMIT") or 25), HARD_DAILY_MAX)
-    packs = [p.strip() for p in (env("OUTREACH_PACKS") or "cleaning").split(",") if p.strip() in engine.PACKS]
+    """Today's (contact, is_follow_up) list: follow-ups first, then new contacts.
+    Each company, address and domain gets one first email and one follow-up, ever."""
     rows = s.outreach_rows()
+    limit = min(int(env("OUTREACH_DAILY_LIMIT") or 25), HARD_DAILY_MAX) - sent_on(rows, today)  # counts earlier runs today
+    if limit <= 0:
+        return []
+    packs = [p.strip() for p in (env("OUTREACH_PACKS") or "cleaning").split(",") if p.strip() in engine.PACKS]
+    suppressed = s.suppression_keys()
     subs = {x["email"].lower() for x in s.all_subscribers()}
-    blocked_domains = {domain(c["email"]) for c in rows if c["status"] in ("opted_out", "bounced", "replied", "converted")}
-    contacted = {c["email"] for c in rows if c.get("emailed_at")}
+    sub_domains = {domain(e) for e in subs} - WEBMAIL
+    responded = {domain(c["email"]) for c in rows if c["status"] in ("opted_out", "bounced", "replied", "converted")}
+    ever_contacted = {domain(c["email"]) for c in rows if c.get("emailed_at")}
     cutoff = (dt.datetime.combine(today, dt.time(), dt.timezone.utc) - dt.timedelta(days=FOLLOW_UP_AFTER_DAYS)).isoformat()
-    ups = [(c, True) for c in rows if c["status"] == "emailed" and not c.get("followed_up_at")
-           and (c.get("emailed_at") or "9") <= cutoff and domain(c["email"]) not in blocked_domains and c["email"] not in subs]
-    fresh, seen_domains = [], set()
-    for c in sorted((c for c in rows if c["status"] == "checked" and c.get("pack") in packs), key=lambda c: c.get("created_at") or "", reverse=True):
+    ups = [(c, True) for c in rows
+           if c["status"] == "emailed" and c.get("emailed_at") and not c.get("followed_up_at") and not c.get("responded_at")
+           and c["emailed_at"] <= cutoff and domain(c["email"]) not in responded | sub_domains and c["email"] not in subs]
+    fresh, seen_domains, seen_emails = [], set(), set()
+    for c in sorted((c for c in rows if c["status"] == "checked" and c.get("pack") in packs),
+                    key=lambda c: c.get("created_at") or "", reverse=True):
         d = domain(c["email"])
-        if d in blocked_domains or d in seen_domains or c["email"] in contacted or c["email"] in subs or screen(c["email"]):
+        if (keys_for(c) & suppressed or d in ever_contacted or d in responded or d in sub_domains or d in seen_domains
+                or c["email"] in subs or c["email"] in seen_emails or screen(c["email"])):
             continue
-        seen_domains.add(d); fresh.append((c, False))
+        seen_domains.add(d); seen_emails.add(c["email"]); fresh.append((c, False))
     return (ups + fresh)[:limit]
 
 
 def send(s, dry_run: bool = False, today: dt.date | None = None, pause_between=(60, 180)) -> dict:
-    today = today or dt.date.today()
+    today = today or dt.datetime.now(dt.timezone.utc).date()
     if today.weekday() >= 5:
         return {"skipped": "weekend"}
     paused = s.get_state("outreach_paused")
@@ -360,28 +449,30 @@ def send(s, dry_run: bool = False, today: dt.date | None = None, pause_between=(
         h = hook(notices, c["pack"], c.get("region"), today)
         if not h:
             out["no_live_tender"] += 1; continue
-        subject, body = render(c, *h, follow_up=follow_up)
+        subject, body, html_body = render(c, *h, follow_up=follow_up)
         if dry_run:
-            previews.append((c, subject, body)); continue
+            previews.append((c, subject, body, html_body)); continue
+        # Record first, send second: if anything fails after this, the contact gets one email too few, never one too many.
+        stamp = engine.now() if today == dt.datetime.now(dt.timezone.utc).date() else f"{today.isoformat()}T09:00:00+00:00"
+        s.outreach_update(c["id"], {"status": "followed_up", "followed_up_at": stamp} if follow_up
+                          else {"status": "emailed", "emailed_at": stamp, "subject": subject[:200]})
+        s.suppress(keys_for(c), "emailed")
         if time.time() - token_at > 45 * 60:  # Graph tokens last about an hour; a full batch can take longer
             token, token_at = graph_token(), time.time()
         try:
-            graph_send(token, build_message(c, subject, body))
+            graph_send(token, build_message(c, subject, body, html_body))
         except urllib.error.HTTPError as e:
             if e.code in (429,) or e.code >= 500:
-                raise  # Microsoft is throttling or down: stop, try again tomorrow
+                raise  # Microsoft is throttling or down: stop for today (this contact stays marked, so no retry)
             s.outreach_update(c["id"], {"status": "skipped", "skip_reason": f"send refused ({e.code})"})
             out["failed"] += 1; continue
-        stamp = engine.now()
-        s.outreach_update(c["id"], {"status": "followed_up", "followed_up_at": stamp} if follow_up
-                          else {"status": "emailed", "emailed_at": stamp, "subject": subject[:200]})
         out["follow_ups" if follow_up else "sent"] += 1
         time.sleep(random.uniform(*pause_between))  # spread sends out like a person would
     if dry_run and previews and token:
         # Preview goes ONLY to the owners' inbox, never to the contact, and never into the public log.
-        for c, subject, body in previews[:3]:
-            graph_send(token, build_message(c, f"[PREVIEW, not sent] {subject}",
-                                            f"Would go to: {c['company_name']} ({c['company_number']})\n\n{body}", to=engine.OWNER_EMAIL))
+        for c, subject, body, html_body in previews[:3]:
+            graph_send(token, build_message(c, f"[PREVIEW, not sent to {c['company_name']}] {subject}", body, html_body,
+                                            to=engine.OWNER_EMAIL))
             out["previews_to_owner"] += 1
     out["would_send"] = len(previews) if dry_run else None
     return out
