@@ -1,0 +1,45 @@
+name: Daily - sync payments and send digests
+
+on:
+  schedule:
+    - cron: "23 5 * * *"   # 05:23 UTC, so emails land before 7am UK time (GitHub may run it late)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build digests without sending"
+        type: boolean
+        default: true
+
+concurrency:
+  group: bidcanary-daily
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+      STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+      STRIPE_PRICE_STARTER: ${{ secrets.STRIPE_PRICE_STARTER }}
+      STRIPE_PRICE_PRO: ${{ secrets.STRIPE_PRICE_PRO }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SITE_URL: ${{ secrets.SITE_URL }}
+      POSTAL_ADDRESS: ${{ secrets.POSTAL_ADDRESS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sync plans from Stripe
+        if: env.STRIPE_SECRET_KEY != ''
+        run: python engine.py sync-stripe
+      - name: Send digests
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            python engine.py digest --dry-run
+          else
+            python engine.py digest
+          fi

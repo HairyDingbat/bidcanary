@@ -1,0 +1,53 @@
+name: Hourly - fetch tenders and publish site
+
+on:
+  schedule:
+    - cron: "17 * * * *"   # every hour at :17 (UTC); GitHub may run it a few minutes late
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["site/**"]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: bidcanary-hourly
+  cancel-in-progress: false
+
+jobs:
+  fetch-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch new notices and rebuild area counts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python engine.py fetch
+      - name: Write public site config
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          STARTER_LINK: ${{ secrets.STRIPE_STARTER_LINK }}
+        run: |
+          python - <<'PY'
+          import json, os
+          cfg = {"supabaseUrl": os.environ.get("SUPABASE_URL", ""),
+                 "supabaseAnonKey": os.environ.get("SUPABASE_ANON_KEY", ""),
+                 "starterLink": os.environ.get("STARTER_LINK", "")}
+          open("site/config.js", "w").write("window.BC_CONFIG = " + json.dumps(cfg) + ";\n")
+          PY
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
