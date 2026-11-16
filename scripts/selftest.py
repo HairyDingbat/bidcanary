@@ -100,6 +100,29 @@ if row:
     s, b = call("POST", "rpc/unsubscribe", PUB, {"token": str(uuid.uuid4())})
     check("a made-up unsubscribe token does nothing", s == 200 and b is False, f"{s} {b}")
 
+if row:
+    s, b = call("GET", f"subscribers?email=eq.{email}&select=trial_ends_at,ref_code", SEC)
+    r2 = b[0] if s == 200 and b else {}
+    check("confirming starts the 14-day trial", bool(r2.get("trial_ends_at")), f"{s} {b}")
+    check("every subscriber gets a referral code", bool(r2.get("ref_code")), f"{s} {b}")
+
+s, b = call("POST", "subscribers", PUB, {"email": "ref-" + email, "pack": "cleaning", "referred_by": "abcd1234", "consent_text": "selftest"},
+            {"Prefer": "return=minimal"})
+check("public key can record a referral code", s in (200, 201), f"{s} {b}")
+s, b = call("POST", "subscribers", PUB, {"email": "refbad-" + email, "pack": "cleaning", "referred_by": "<script>"}, {"Prefer": "return=minimal"})
+check("junk referral codes are rejected", s >= 400, f"{s} {b}")
+for col, val in (("trial_ends_at", "2099-01-01T00:00:00Z"), ("founding", True), ("ref_code", "deadbeef")):
+    s, b = call("POST", "subscribers", PUB, {"email": f"{col}-" + email, "pack": "cleaning", col: val}, {"Prefer": "return=minimal"})
+    check(f"public key cannot set {col}", s >= 400, f"{s} {b}")
+s, b = call("GET", "outreach_contacts?select=email&limit=1", PUB)
+check("public key cannot read outreach contacts", s in (401, 403, 404) or (s == 200 and b == []), f"{s} {b}")
+s, b = call("GET", "outreach_suppression?select=key&limit=1", PUB)
+check("public key cannot read the suppression list", s in (401, 403, 404) or (s == 200 and b == []), f"{s} {b}")
+s, b = call("POST", "rpc/outreach_optout", PUB, {"token": str(uuid.uuid4())})
+check("a made-up outreach opt-out token does nothing", s == 200 and b is False, f"{s} {b}")
+s, b = call("POST", "rpc/prune_outreach", PUB, {})
+check("public key cannot run the outreach clean-up", s >= 400, f"{s} {b}")
+
 s, b = call("GET", "notices?select=ocid&limit=1", SEC)
 check("engine has stored tender notices", s == 200 and bool(b), f"{s} {b}")
 
