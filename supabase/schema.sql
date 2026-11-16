@@ -8,7 +8,8 @@ create extension if not exists pgcrypto;
 create table if not exists subscribers (
   id uuid primary key default gen_random_uuid(),
   email text not null unique check (email ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$' and length(email) <= 254),
-  pack text not null check (pack in ('cleaning', 'security', 'grounds', 'fm')),
+  pack text not null check (pack ~ '^[a-z]{2,20}$'),
+  keywords text check (length(keywords) <= 200),
   regions text not null default '' check (regions ~ '^(UK[C-N](,UK[C-N])*)?$'),
   plan text not null default 'free' check (plan in ('free', 'starter', 'pro')),
   status text not null default 'pending' check (status in ('pending', 'active', 'unsubscribed')),
@@ -41,7 +42,7 @@ alter table state enable row level security;
 
 -- Website signups: insert only, only these columns, only as free + active. No reading back.
 revoke all on subscribers from anon, authenticated;
-grant insert (email, pack, regions, consent_text) on subscribers to anon;
+grant insert (email, pack, regions, keywords, consent_text) on subscribers to anon;
 drop policy if exists "public free signup" on subscribers;
 create policy "public free signup" on subscribers for insert to anon
   with check (plan = 'free' and status = 'pending');

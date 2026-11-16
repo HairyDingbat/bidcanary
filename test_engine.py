@@ -106,4 +106,16 @@ r["tender"]["items"] = []; r["parties"] = [{"name": "Belfast council", "roles": 
 nb = engine.parse_release(r)
 assert nb["regions"] == ["UKN0"]
 assert engine.in_regions(nb, ["UKN"]) and not engine.in_regions(nb, ["UKD"])
+# All sectors + custom keywords.
+assert len(engine.PACKS) >= 18 and "construction" in engine.PACKS and "it" in engine.PACKS
+road = {"title": "Highway resurfacing works", "description": "Resurfacing of A-roads", "cpvs": ["45233142"], "regions": ["UKD3"]}
+assert engine.matches(road, {"pack": "construction", "regions": "UKD"})
+assert not engine.matches(road, {"pack": "cleaning", "regions": "UKD"})
+assert engine.matches(road, {"pack": "cleaning", "regions": "UKD", "keywords": "resurfacing"})     # keywords widen
+assert engine.matches(road, {"pack": "custom", "regions": "", "keywords": "highway, potholes"})
+assert not engine.matches(road, {"pack": "custom", "regions": "", "keywords": ""})              # custom with no keywords matches nothing
+assert engine.keyword_list("a, ab, roofing, , solar") == ["roofing", "solar"]
+assert engine.sector_phrase({"pack": "cleaning"}) == "cleaning tenders"
+assert engine.sector_phrase({"pack": "custom"}) == "tenders matching your keywords"
+assert engine.sector_phrase({"pack": "it"}) == "IT, software and digital tenders"
 print("all tests passed")

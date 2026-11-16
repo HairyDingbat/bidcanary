@@ -42,10 +42,27 @@ SITE_URL = os.environ.get("SITE_URL", "https://bidcanary.co.uk").rstrip("/")
 
 # CPV prefixes match the code and all its children.
 PACKS = {
+    # Marketing leads with cleaning; the product covers every main public sector category.
     "cleaning": {"label": "Cleaning", "cpv": ["909", "3983"], "keywords": ["cleaning", "janitorial", "washroom", "hygiene services"]},
     "security": {"label": "Security", "cpv": ["7971", "5161"], "keywords": ["security services", "guarding", "cctv monitoring", "key holding", "alarm response"]},
     "grounds": {"label": "Grounds maintenance", "cpv": ["7731", "7721"], "keywords": ["grounds maintenance", "landscaping", "grass cutting", "arboricultur"]},
     "fm": {"label": "Facilities management", "cpv": ["7952", "5070"], "keywords": ["facilities management", "soft fm", "hard fm", "caretaking"]},
+    "construction": {"label": "Construction and building works", "cpv": ["45"], "keywords": ["construction works", "refurbishment", "building works", "roofing", "groundworks"]},
+    "engineering": {"label": "Architecture, engineering and surveying", "cpv": ["71"], "keywords": ["architect", "surveying", "structural engineer", "quantity surveyor"]},
+    "repairs": {"label": "Building maintenance and trades", "cpv": ["5070", "5071", "5072", "5073", "4533", "4542", "4544", "4545"], "keywords": ["repairs and maintenance", "electrical maintenance", "plumbing", "painting and decorating", "gas servicing"]},
+    "it": {"label": "IT, software and digital", "cpv": ["72", "48", "302", "324"], "keywords": ["software", "digital services", "it support", "cyber security", "website"]},
+    "health": {"label": "Health and social care", "cpv": ["85"], "keywords": ["care services", "domiciliary care", "social care", "healthcare services"]},
+    "medical": {"label": "Medical equipment and supplies", "cpv": ["33"], "keywords": ["medical equipment", "medical supplies", "pharmaceutical"]},
+    "education": {"label": "Education and training", "cpv": ["80"], "keywords": ["training services", "training provider", "education services", "apprenticeship"]},
+    "transport": {"label": "Transport, fleet and vehicles", "cpv": ["60", "34", "501"], "keywords": ["transport services", "fleet", "vehicle", "passenger transport", "taxi"]},
+    "catering": {"label": "Catering and food", "cpv": ["555", "15"], "keywords": ["catering", "food supply", "school meals", "vending"]},
+    "professional": {"label": "Consultancy and professional services", "cpv": ["791", "792", "794", "73"], "keywords": ["consultancy", "legal services", "accountancy", "audit", "research services"]},
+    "marketing": {"label": "Marketing, design and communications", "cpv": ["7934", "7982", "7996", "7941"], "keywords": ["marketing", "communications", "graphic design", "printing", "video production"]},
+    "staffing": {"label": "Recruitment and staffing", "cpv": ["7961", "7962"], "keywords": ["recruitment", "temporary staff", "agency workers", "staffing"]},
+    "waste": {"label": "Waste and environmental services", "cpv": ["905", "906", "907", "908"], "keywords": ["waste collection", "recycling", "environmental services", "pest control"]},
+    "energy": {"label": "Energy and utilities", "cpv": ["09", "65", "4533"], "keywords": ["energy", "electricity supply", "solar", "heat pump", "ev charging"]},
+    "supplies": {"label": "Furniture, equipment and supplies", "cpv": ["39", "30", "22", "18"], "keywords": ["furniture", "office supplies", "stationery", "uniforms", "workwear"]},
+    "custom": {"label": "Something else (use my keywords)", "cpv": [], "keywords": []},
 }
 # NUTS/ITL level-1 codes used in Find a Tender delivery addresses.
 REGIONS = {
@@ -86,7 +103,7 @@ class SQLiteStore:
     SCHEMA = """
     CREATE TABLE IF NOT EXISTS notices (ocid TEXT PRIMARY KEY, title TEXT, description TEXT, buyer TEXT,
       value REAL, deadline TEXT, cpvs TEXT, regions TEXT, url TEXT, summary TEXT, seen_at TEXT);
-    CREATE TABLE IF NOT EXISTS subscribers (id TEXT PRIMARY KEY, email TEXT UNIQUE, pack TEXT, regions TEXT,
+    CREATE TABLE IF NOT EXISTS subscribers (id TEXT PRIMARY KEY, email TEXT UNIQUE, pack TEXT, regions TEXT, keywords TEXT,
       plan TEXT DEFAULT 'free', status TEXT DEFAULT 'pending', unsub_token TEXT, created_at TEXT, confirm_sent_at TEXT);
     CREATE TABLE IF NOT EXISTS sent (subscriber_id TEXT, ocid TEXT, sent_at TEXT, PRIMARY KEY (subscriber_id, ocid));
     CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT);
@@ -295,10 +312,26 @@ def fetch(s, days_back: int | None = None) -> int:
 
 # ---------------------------------------------------------------- match
 
-def topical(n: dict, pack: str) -> bool:
-    p = PACKS[pack]
+def sector_phrase(sub: dict) -> str:
+    """Words for emails: 'cleaning tenders', or 'tenders matching your keywords' for custom profiles."""
+    if sub.get("pack") == "custom" or sub.get("pack") not in PACKS:
+        return "tenders matching your keywords"
+    label = PACKS[sub["pack"]]["label"]
+    if not label[:2].isupper():  # keep acronyms like "IT"
+        label = label[0].lower() + label[1:]
+    return label + " tenders"
+
+
+def keyword_list(raw: str | None) -> list[str]:
+    return [k.strip().lower() for k in (raw or "").split(",") if len(k.strip()) >= 3][:10]
+
+
+def topical(n: dict, pack: str, extra_keywords: list[str] | None = None) -> bool:
+    """Sector match by CPV code or keyword, plus any customer keywords (which widen the match)."""
+    p = PACKS.get(pack, PACKS["custom"])
     text = f"{n['title']} {n['description']}".lower()
-    return any(c.startswith(x) for c in n["cpvs"] for x in p["cpv"]) or any(k in text for k in p["keywords"])
+    words = p["keywords"] + (extra_keywords or [])
+    return any(c.startswith(x) for c in n["cpvs"] for x in p["cpv"]) or any(k in text for k in words)
 
 
 def is_national(n: dict) -> bool:
@@ -314,7 +347,7 @@ def in_regions(n: dict, wanted: list[str]) -> bool:
 
 def matches(n: dict, sub: dict) -> bool:
     wanted = [r.strip().upper() for r in (sub.get("regions") or "").split(",") if r.strip()]
-    return topical(n, sub["pack"]) and in_regions(n, wanted)
+    return topical(n, sub["pack"], keyword_list(sub.get("keywords"))) and in_regions(n, wanted)
 
 
 def build_counts(s, path="site/data/counts.json") -> dict:
@@ -322,6 +355,8 @@ def build_counts(s, path="site/data/counts.json") -> dict:
     notices = s.open_notices()
     out = {"updated": now(), "packs": {}}
     for pack, meta in PACKS.items():
+        if pack == "custom":
+            continue
         per = {}
         national = [n for n in notices if topical(n, pack) and is_national(n)]
         for code in REGIONS:
@@ -406,8 +441,8 @@ def render_confirmation(sub: dict) -> str:
     address = html.escape(os.environ.get("POSTAL_ADDRESS", ""))
     return f"""<div style="max-width:560px;margin:auto;padding:24px;font:15px/1.6 system-ui;color:#0e1512">
     <h1 style="font:700 20px system-ui">Confirm your Bid Canary alerts</h1>
-    <p>Someone (hopefully you) asked for weekly public sector tender alerts for
-    {html.escape(PACKS.get(sub['pack'], {'label': sub['pack']})['label'].lower())} to be sent to this address.</p>
+    <p>Someone (hopefully you) asked for weekly public sector tender alerts
+    ({html.escape(sector_phrase(sub))}) to be sent to this address.</p>
     <p><a href="{link}" style="display:inline-block;background:#FFD43B;color:#0e1512;font-weight:600;padding:12px 20px;border-radius:999px;text-decoration:none">Yes, send me tenders</a></p>
     <p style="color:#475569">If this wasn't you, ignore this email and you won't hear from us again. Unconfirmed sign-ups are deleted after 7 days.</p>
     <p style="font-size:12px;color:#64748b">Bid Canary{(' · ' + address) if address else ''}</p></div>"""
@@ -494,7 +529,7 @@ def digest(s, dry_run=False, today: dt.date | None = None, free_limit=1) -> dict
             if not n.get("summary"):
                 n["summary"] = summarise(n); s.set_summary(n["ocid"], n["summary"])
         page = render_digest(shown, sub, extra)
-        subject = f"{len(picked)} new {PACKS[sub['pack']]['label'].lower()} tender{'s' if len(picked) != 1 else ''}"
+        subject = f"{len(picked)} new {sector_phrase(sub)}" if len(picked) != 1 else f"1 new {sector_phrase(sub).replace('tenders', 'tender', 1)}"
         if not dry_run:
             send_email(sub["email"], f"Bid Canary: {subject}", page, f"{SITE_URL}/unsubscribe.html?t={sub['unsub_token']}")
         s.mark_sent(sub["id"], [n["ocid"] for n in picked])
