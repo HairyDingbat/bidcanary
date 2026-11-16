@@ -4,6 +4,10 @@ on:
   schedule:
     - cron: "17 * * * *"   # every hour at :17 (UTC); GitHub may run it a few minutes late
   workflow_dispatch:
+    inputs:
+      refetch_days:
+        description: "Re-download this many days of notices (blank = normal hourly run)"
+        default: ""
   push:
     branches: [main]
     paths: ["site/**"]
@@ -32,7 +36,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python engine.py fetch
+        run: python engine.py fetch ${{ inputs.refetch_days }}
       - name: Send confirmation emails to new sign-ups
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

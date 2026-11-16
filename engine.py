@@ -229,6 +229,23 @@ def store():
 
 # ---------------------------------------------------------------- fetch
 
+NATIONAL = ["UK"]
+
+
+def resolve_regions(delivery: list, buyer_region: str | None) -> list[str]:
+    """Where the work is. Specific delivery regions first; else the buyer's region.
+    Returns ["UK"] for UK-wide work (delivery says "UK" or spans 6+ regions with no better clue)."""
+    codes = sorted({str(c).strip().upper() for c in delivery if c and str(c).strip().upper().startswith("UK")})
+    specific = [c for c in codes if len(c) >= 3 and c[:3] in REGIONS]
+    level1 = {c[:3] for c in specific}
+    if specific and len(level1) < 6:
+        return specific
+    b = str(buyer_region or "").strip().upper()
+    if b[:3] in REGIONS and not (specific and len(level1) >= 6):
+        return [b]
+    return NATIONAL
+
+
 def parse_release(rel: dict) -> dict | None:
     """Flatten one OCDS release. Returns None unless it advertises an opportunity."""
     tags = rel.get("tag", [])
@@ -242,9 +259,11 @@ def parse_release(rel: dict) -> dict | None:
     for c in classes:
         if c.get("scheme", "").upper() == "CPV" and c.get("id"):
             cpvs.add(str(c["id"]))
-    regions = {a["region"] for it in t.get("items", []) for a in it.get("deliveryAddresses", []) if a.get("region")}
-    buyer = (rel.get("buyer") or {}).get("name") or next(
-        (p.get("name") for p in rel.get("parties", []) if "buyer" in p.get("roles", [])), "")
+    buyer_party = next((p for p in rel.get("parties", []) if "buyer" in p.get("roles", [])), {})
+    buyer = (rel.get("buyer") or {}).get("name") or buyer_party.get("name", "")
+    regions = resolve_regions(
+        [a.get("region") for it in t.get("items", []) for a in it.get("deliveryAddresses", [])],
+        (buyer_party.get("address") or {}).get("region"))
     url = next((d.get("url") for d in t.get("documents", []) if "find-tender" in (d.get("url") or "")), None)
     return {
         "ocid": rel.get("ocid"), "title": t.get("title", ""), "description": (t.get("description") or "")[:4000],
@@ -256,8 +275,9 @@ def parse_release(rel: dict) -> dict | None:
     }
 
 
-def fetch(s) -> int:
-    start = s.get_state("last_fetch") or (dt.datetime.utcnow() - dt.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S")
+def fetch(s, days_back: int | None = None) -> int:
+    start = (None if days_back else s.get_state("last_fetch")) or (
+        dt.datetime.utcnow() - dt.timedelta(days=days_back or 3)).strftime("%Y-%m-%dT%H:%M:%S")
     end = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
     url = f"{FTS_URL}?{urllib.parse.urlencode({'updatedFrom': start, 'updatedTo': end, 'limit': 100})}"
     rows = []
@@ -281,9 +301,15 @@ def topical(n: dict, pack: str) -> bool:
     return any(c.startswith(x) for c in n["cpvs"] for x in p["cpv"]) or any(k in text for k in p["keywords"])
 
 
+def is_national(n: dict) -> bool:
+    return not n["regions"] or n["regions"] == NATIONAL
+
+
 def in_regions(n: dict, wanted: list[str]) -> bool:
-    # Notices with no stated location are kept: buyers often omit it.
-    return not wanted or not n["regions"] or any(r.upper().startswith(w) for r in n["regions"] for w in wanted)
+    """No regions chosen = everything. Otherwise only work located in those regions (UK-wide work excluded)."""
+    if not wanted:
+        return True
+    return not is_national(n) and any(r.upper().startswith(w) for r in n["regions"] for w in wanted)
 
 
 def matches(n: dict, sub: dict) -> bool:
@@ -297,13 +323,14 @@ def build_counts(s, path="site/data/counts.json") -> dict:
     out = {"updated": now(), "packs": {}}
     for pack, meta in PACKS.items():
         per = {}
+        national = [n for n in notices if topical(n, pack) and is_national(n)]
         for code in REGIONS:
             hits = [n for n in notices if topical(n, pack) and in_regions(n, [code])]
             hits.sort(key=lambda n: n["deadline"] or "9999")
             per[code] = {"count": len(hits), "examples": [
                 {"title": n["title"][:120], "buyer": n["buyer"][:80], "value": n["value"],
                  "deadline": (n["deadline"] or "")[:10], "url": n["url"]} for n in hits[:3]]}
-        out["packs"][pack] = {"label": meta["label"], "regions": per}
+        out["packs"][pack] = {"label": meta["label"], "regions": per, "national": len(national)}
     out["regionNames"] = REGIONS
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -471,7 +498,10 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
     s = store()
     if cmd == "fetch":
-        n = fetch(s); build_counts(s); print(f"stored {n} releases; counts rebuilt")
+        days = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else None
+        n = fetch(s, days); c = build_counts(s); print(f"stored {n} releases; counts rebuilt")
+        for pk, v in c["packs"].items():
+            print(pk, "UK-wide:", v["national"], "|", " ".join(f"{k}:{r['count']}" for k, r in v["regions"].items()))
     elif cmd == "confirmations":
         print(json.dumps(send_confirmations(s, dry_run="--dry-run" in sys.argv)))
     elif cmd == "sync-stripe":

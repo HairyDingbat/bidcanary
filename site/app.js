@@ -21,7 +21,7 @@
   function render() {
     if (!data) { out.innerHTML = '<p class="meta">Live counts will appear here once the service is running.</p>'; return; }
     var r = data.packs[cp.value].regions[cr.value];
-    var h = '<div class="big">' + r.count + '</div><p style="margin:0 0 6px">open ' + esc(PACKS[cp.value].toLowerCase()) + ' tenders covering ' + esc(REGIONS[cr.value]) + ', including ones with no location stated.</p>';
+    var h = '<div class="big">' + r.count + '</div><p style="margin:0 0 6px">open ' + esc(PACKS[cp.value].toLowerCase()) + ' tenders in ' + esc(REGIONS[cr.value]) + '.</p>' + (data.packs[cp.value].national ? '<p class="meta" style="margin:0 0 6px">Plus ' + data.packs[cp.value].national + ' UK-wide ' + esc(PACKS[cp.value].toLowerCase()) + ' tenders open to firms anywhere.</p>' : '');
     r.examples.forEach(function (e) {
       h += '<div class="ex"><b>' + esc(e.title) + '</b><span class="meta">' + esc(e.buyer) + ' · ' + money(e.value) + (e.deadline ? ' · Closes ' + esc(e.deadline) : '') + '</span></div>';
     });

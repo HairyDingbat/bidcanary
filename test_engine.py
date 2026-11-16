@@ -88,4 +88,21 @@ pkg = {"releases": [rel("dup", "Cleaning v1", "90919200", "UKD3", 1, future), re
 engine.http_json = lambda url, *a, **k: pkg
 engine.fetch(r2)
 assert [n["title"] for n in r2.open_notices()] == ["Cleaning v2"]
+# Region resolution: specific delivery > buyer region > UK-wide.
+R = engine.resolve_regions
+assert R(["UKD3"], "UKI3") == ["UKD3"]                  # delivery wins
+assert R([], "UKN0") == ["UKN0"]                        # no delivery: buyer's region
+assert R(["UK"], "UKJ1") == ["UKJ1"]                    # "UK" only: buyer's region
+assert R([], None) == ["UK"]                            # nothing known: UK-wide
+allr = ["UKC", "UKD", "UKE", "UKF", "UKG", "UKH", "UKI"]
+assert R(allr, "UKI3") == ["UK"]                        # spans 6+ regions: UK-wide
+n_local = {"regions": ["UKN0"]}; n_nat = {"regions": ["UK"]}
+assert engine.in_regions(n_local, ["UKN"]) and not engine.in_regions(n_local, ["UKD"])
+assert not engine.in_regions(n_nat, ["UKD"]) and engine.in_regions(n_nat, [])
+# A tender with no delivery address but a Belfast buyer must not appear in the North West.
+r = rel("ocds-belfast", "Office cleaning Belfast", "90919200", None, 50000, future)
+r["tender"]["items"] = []; r["parties"] = [{"name": "Belfast council", "roles": ["buyer"], "address": {"region": "UKN0"}}]
+nb = engine.parse_release(r)
+assert nb["regions"] == ["UKN0"]
+assert engine.in_regions(nb, ["UKN"]) and not engine.in_regions(nb, ["UKD"])
 print("all tests passed")
