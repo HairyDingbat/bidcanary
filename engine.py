@@ -445,7 +445,9 @@ def render_confirmation(sub: dict) -> str:
     ({html.escape(sector_phrase(sub))}) to be sent to this address.</p>
     <p><a href="{link}" style="display:inline-block;background:#FFD43B;color:#0e1512;font-weight:600;padding:12px 20px;border-radius:999px;text-decoration:none">Yes, send me tenders</a></p>
     <p style="color:#475569">If this wasn't you, ignore this email and you won't hear from us again. Unconfirmed sign-ups are deleted after 7 days.</p>
-    <p style="font-size:12px;color:#64748b">Bid Canary{(' · ' + address) if address else ''}</p></div>"""
+    <p style="color:#475569">Bid Canary sends public sector tender alerts to businesses. Questions? Email
+    <a href="mailto:support@bidcanary.co.uk">support@bidcanary.co.uk</a>.</p>
+    <p style="font-size:12px;color:#64748b">Bid Canary · <a href="{SITE_URL}">bidcanary.co.uk</a>{(' · ' + address) if address else ''}</p></div>"""
 
 
 def send_confirmations(s, dry_run=False) -> dict:
@@ -493,10 +495,23 @@ def render_digest(items: list[dict], sub: dict, extra_count: int = 0) -> str:
     Bid Canary{(' · ' + address) if address else ''} · <a href="{unsub}">Unsubscribe</a></p></div>"""
 
 
+def html_to_text(h: str) -> str:
+    """Plain-text alternative for every email (spam filters distrust HTML-only mail)."""
+    import re
+    t = re.sub(r'<a [^>]*href="([^"]+)"[^>]*>(.*?)</a>', lambda m: f"{m.group(2)} ({m.group(1)})", h, flags=re.S)
+    t = re.sub(r"<(br|/p|/h1|/div|/tr)[^>]*>", "\n", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = html.unescape(t)
+    lines = [" ".join(l.split()) for l in t.splitlines()]
+    out = "\n".join(l for l in lines if l)
+    return out
+
+
 def send_email(to: str, subject: str, html_body: str, unsub_url: str) -> None:
     body = json.dumps({"from": os.environ["FROM_EMAIL"], "to": [to], "subject": subject, "html": html_body,
+                       "text": html_to_text(html_body),
                        "reply_to": os.environ.get("REPLY_TO", "support@bidcanary.co.uk"),
-                       "headers": {"List-Unsubscribe": f"<{unsub_url}>"}}).encode()
+                       "headers": {"List-Unsubscribe": f"<{unsub_url}>, <mailto:support@bidcanary.co.uk?subject=unsubscribe>"}}).encode()
     http_json("https://api.resend.com/emails", body,
               {"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}", "Content-Type": "application/json"})
 

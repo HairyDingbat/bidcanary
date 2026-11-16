@@ -118,4 +118,6 @@ assert engine.keyword_list("a, ab, roofing, , solar") == ["roofing", "solar"]
 assert engine.sector_phrase({"pack": "cleaning"}) == "cleaning tenders"
 assert engine.sector_phrase({"pack": "custom"}) == "tenders matching your keywords"
 assert engine.sector_phrase({"pack": "it"}) == "IT, software and digital tenders"
+txt = engine.html_to_text(engine.render_confirmation({"pack": "cleaning", "unsub_token": "t9"}))
+assert "Yes, send me tenders (https://bidcanary.co.uk/confirm.html?t=t9)" in txt and "<" not in txt, txt
 print("all tests passed")
